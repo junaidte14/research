@@ -1,0 +1,242 @@
+{
+ "sst2_large": {
+  "dataset": "sst2",
+  "scale": "large",
+  "max_len": 64,
+  "train_used": {
+   "n": 20000,
+   "positive_frac": 0.55425,
+   "words": {
+    "mean": 9.4602,
+    "median": 7.0,
+    "p90": 21.0,
+    "max": 52.0
+   },
+   "wordpieces": {
+    "mean": 13.3905,
+    "median": 10.0,
+    "p90": 27.0,
+    "max": 63.0
+   },
+   "truncated_frac": 0.0,
+   "candidates_mean": 1.21565,
+   "with_candidate_frac": 0.6476
+  },
+  "eval": {
+   "n": 872,
+   "positive_frac": 0.5091743119266054,
+   "words": {
+    "mean": 19.548165137614678,
+    "median": 19.0,
+    "p90": 31.899999999999977,
+    "max": 47.0
+   },
+   "wordpieces": {
+    "mean": 25.163990825688074,
+    "median": 24.5,
+    "p90": 40.0,
+    "max": 55.0
+   },
+   "truncated_frac": 0.0,
+   "candidates_mean": 2.2970183486238533,
+   "with_candidate_frac": 0.8761467889908257
+  },
+  "banks": {
+   "train": {
+    "with_validated_variant_frac": 0.51125,
+    "with_two_variants_frac": 0.38705,
+    "mean_swaps": 1.2765770171149144,
+    "mean_similarity": 0.9417501418092908
+   },
+   "eval": {
+    "light": {
+     "with_candidates": 764,
+     "accepted": 742,
+     "acceptance_of_candidates": 0.9712041884816754,
+     "mean_swaps": 1.0202156334231807,
+     "realised_frac_of_eligible": 0.5226511359260685,
+     "realised_frac_of_words": 0.060129450697496006,
+     "mean_similarity": 0.9661029649595688
+    },
+    "medium": {
+     "with_candidates": 764,
+     "accepted": 736,
+     "acceptance_of_candidates": 0.9633507853403142,
+     "mean_swaps": 1.5217391304347827,
+     "realised_frac_of_eligible": 0.6558795936853002,
+     "realised_frac_of_words": 0.08311441349699002,
+     "mean_similarity": 0.9539275815217391
+    },
+    "heavy": {
+     "with_candidates": 764,
+     "accepted": 698,
+     "acceptance_of_candidates": 0.9136125654450262,
+     "mean_swaps": 2.041547277936963,
+     "realised_frac_of_eligible": 0.8468856597080092,
+     "realised_frac_of_words": 0.10615294979152494,
+     "mean_similarity": 0.9446063037249284
+    }
+   }
+  }
+ },
+ "rotten_tomatoes_large": {
+  "dataset": "rotten_tomatoes",
+  "scale": "large",
+  "max_len": 64,
+  "train_used": {
+   "n": 8530,
+   "positive_frac": 0.5,
+   "words": {
+    "mean": 20.99284876905041,
+    "median": 20.0,
+    "p90": 34.0,
+    "max": 59.0
+   },
+   "wordpieces": {
+    "mean": 27.368347010550995,
+    "median": 27.0,
+    "p90": 43.0,
+    "max": 78.0
+   },
+   "truncated_frac": 0.0007033997655334115,
+   "candidates_mean": 2.450058616647128,
+   "with_candidate_frac": 0.8833528722157092
+  },
+  "eval": {
+   "n": 1066,
+   "positive_frac": 0.5,
+   "words": {
+    "mean": 20.99718574108818,
+    "median": 21.0,
+    "p90": 34.0,
+    "max": 54.0
+   },
+   "wordpieces": {
+    "mean": 27.322701688555348,
+    "median": 27.0,
+    "p90": 43.0,
+    "max": 72.0
+   },
+   "truncated_frac": 0.0009380863039399625,
+   "candidates_mean": 2.4671669793621014,
+   "with_candidate_frac": 0.8911819887429644
+  },
+  "banks": {
+   "train": {
+    "with_validated_variant_frac": 0.8452520515826495,
+    "with_two_variants_frac": 0.7409144196951934,
+    "mean_swaps": 1.5660194174757283,
+    "mean_similarity": 0.9578253952843274
+   },
+   "eval": {
+    "light": {
+     "with_candidates": 950,
+     "accepted": 927,
+     "acceptance_of_candidates": 0.9757894736842105,
+     "mean_swaps": 1.0237324703344122,
+     "realised_frac_of_eligible": 0.4979897604493073,
+     "realised_frac_of_words": 0.05837658565864387,
+     "mean_similarity": 0.9692581445523194
+    },
+    "medium": {
+     "with_candidates": 950,
+     "accepted": 916,
+     "acceptance_of_candidates": 0.9642105263157895,
+     "mean_swaps": 1.5786026200873362,
+     "realised_frac_of_eligible": 0.6437790254384141,
+     "realised_frac_of_words": 0.08103911045058372,
+     "mean_similarity": 0.9575382096069869
+    },
+    "heavy": {
+     "with_candidates": 950,
+     "accepted": 883,
+     "acceptance_of_candidates": 0.9294736842105263,
+     "mean_swaps": 2.132502831257078,
+     "realised_frac_of_eligible": 0.8301838968883135,
+     "realised_frac_of_words": 0.10460436335609952,
+     "mean_similarity": 0.9461870894677237
+    }
+   }
+  }
+ },
+ "imdb_medium": {
+  "dataset": "imdb",
+  "scale": "medium",
+  "max_len": 128,
+  "train_used": {
+   "n": 5000,
+   "positive_frac": 0.4988,
+   "words": {
+    "mean": 87.3752,
+    "median": 90.0,
+    "p90": 90.0,
+    "max": 90.0
+   },
+   "wordpieces": {
+    "mean": 112.8082,
+    "median": 114.0,
+    "p90": 128.0,
+    "max": 191.0
+   },
+   "truncated_frac": 0.0878,
+   "candidates_mean": 9.0128,
+   "with_candidate_frac": 0.9996
+  },
+  "eval": {
+   "n": 872,
+   "positive_frac": 0.49655963302752293,
+   "words": {
+    "mean": 87.47935779816514,
+    "median": 90.0,
+    "p90": 90.0,
+    "max": 90.0
+   },
+   "wordpieces": {
+    "mean": 112.32912844036697,
+    "median": 113.0,
+    "p90": 127.0,
+    "max": 192.0
+   },
+   "truncated_frac": 0.07454128440366972,
+   "candidates_mean": 9.172018348623853,
+   "with_candidate_frac": 0.9988532110091743
+  },
+  "banks": {
+   "train": {
+    "with_validated_variant_frac": 0.9946,
+    "with_two_variants_frac": 0.9704,
+    "mean_swaps": 3.669817011864066,
+    "mean_similarity": 0.98269845163885
+   },
+   "eval": {
+    "light": {
+     "with_candidates": 871,
+     "accepted": 870,
+     "acceptance_of_candidates": 0.9988518943742825,
+     "mean_swaps": 1.8850574712643677,
+     "realised_frac_of_eligible": 0.2150525058155569,
+     "realised_frac_of_words": 0.021792433766653876,
+     "mean_similarity": 0.9912535632183908
+    },
+    "medium": {
+     "with_candidates": 871,
+     "accepted": 869,
+     "acceptance_of_candidates": 0.9977037887485649,
+     "mean_swaps": 3.7445339470655927,
+     "realised_frac_of_eligible": 0.420421737549802,
+     "realised_frac_of_words": 0.043201433983021564,
+     "mean_similarity": 0.9824863060989644
+    },
+    "heavy": {
+     "with_candidates": 871,
+     "accepted": 867,
+     "acceptance_of_candidates": 0.9954075774971297,
+     "mean_swaps": 5.91926182237601,
+     "realised_frac_of_eligible": 0.6525462167223552,
+     "realised_frac_of_words": 0.06823847566149159,
+     "mean_similarity": 0.9719291810841986
+    }
+   }
+  }
+ }
+}

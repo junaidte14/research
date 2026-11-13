@@ -1,19 +1,21 @@
 # %% [markdown]
-# # LAR v9 — controlled re-run (resumable Kaggle notebook)
+# # LAR v9.3 — controlled re-run, resumable Kaggle notebook
 # 
-# **What this notebook does.** Re-runs the Latent Attribution Regularization experiments under a stricter protocol, with seeds **0–9 in every phase**:
+# Same protocol and config fingerprint as v9 / v9.1, so **existing results files stay compatible** (rows from earlier versions simply have empty new-metric columns).
 # 
-# * new **controls/baselines**: augmentation-only (`aug_only`), prediction-consistency (`pred_consistency`)
-# * new **LAR variants**: alignment-aware training loss (`lar_aligned`), correlation loss (`lar_pearson`), plus the original loss as in v8 (`lar_pos`)
-# * **validated perturbations** (independent classifier + sentence-embedding filter, thresholds fixed in `BANK_PARAMS`), built once and cached, identical for every condition and seed
-# * evaluation of every trained model in one pass: full-validation accuracy, stability (naive-positional vs greedy vs order-preserving alignment — a controlled version of the alignment-artifact finding), alignment coverage, prediction-flip rate, and faithfulness (comprehensiveness / sufficiency vs a random-ranking baseline)
-# * paired statistics (bootstrap CI, d_z, t and Wilcoxon, Holm correction) and LaTeX tables
+# **What is new in v9.3:** cell 6 `dataset_statistics()` computes, for every dataset/scale used, the size, label balance, length (words, word-pieces, % truncated), perturbation-candidate coverage and bank acceptance numbers for the paper's Datasets section (writes `dataset_stats.json` and `tab_datasets.tex`). Nothing else changed, so v9.2 results and phases remain valid.
 # 
-# **One-time setup** (same as v8): Notebook Settings → Internet ON; Add-ons → Secrets: `KAGGLE_USERNAME`, `KAGGLE_KEY`; accelerator GPU. Slug used: `lar-v9-results` (a *new* dataset, never mixed with v8). After the first commit, attach that dataset as an input once.
+# **What changed since v9.1**
+# * **λ locked to 0.25** for the new datasets (SST-2 large sweep, seeds 0–4: λ = 0.25 gives ρ ≈ 0.953 vs 0.958 at λ = 0.5 with no collapsed seed; λ = 0.1 gives 0.933). Phases F and G therefore use `lar_pearson_l0.25`, decided *before* seeing their data.
+# * **Phase E2 now runs only the two baselines** (`ce_only_control`, `aug_only`) with the new metrics, because the λ variants already have them.
+# * **Pooled new-metric analysis** (`newmetrics_vs_aug` in `run_analysis()`): pairs rows that have top-k overlap / IG stability across groups by seed, e.g. H λ rows against E2 baselines.
+# * **`tradeoff_report()` now uses common seeds by default**, so means are paired and comparable (earlier tables compared 10-seed baselines with 5-seed λ rows).
 # 
-# **Every session:** run cells 1–5 (definitions), then run whichever *phase cell* you need. Finished `(phase, condition, seed)` triples are skipped; a half-trained model resumes from its checkpoint; a changed config raises an error instead of silently mixing protocols.
+# **Metrics per trained model:** full-validation accuracy; stability (naive-positional vs greedy vs order-preserving alignment); alignment coverage; prediction-flip rate; faithfulness (comprehensiveness / sufficiency vs random ranking); `topk_jaccard` (top-20% overlap, *not optimised by any loss*), `rho_pearson` (matches the Pearson loss, reported for transparency), `ig_rho` (Integrated-Gradients stability, medium strength, 300 pairs).
 # 
-# **Order:** `S_smoke` (plumbing check, ~minutes) → `A` → **gate** → `B` → `C`/`D` → `E` → analysis. Phases A and B share SST-2/small, so contrasts are computed across both.
+# **Every session:** run cells 1–5 (definitions), then the phase cell you want. Finished `(phase, condition, seed)` triples are skipped; a half-trained model resumes from its checkpoint; a changed config raises an error. The runner is seed-outer: after each seed every condition has paired data, so you can stop at any point and analyse.
+# 
+# **Setup / parallel notebooks:** Internet ON, GPU on, Secrets `KAGGLE_USERNAME` / `KAGGLE_KEY`; attach the dataset holding your results store as an input and check that cell 1 prints the expected `Results store: N rows`. Keep `DATASETS`, `SCALES`, `BANK_PARAMS`, `LEARNING_RATE` identical across notebooks. If two notebooks run at once, give each its own `KAGGLE_DATASET_SLUG` (later commits overwrite earlier ones otherwise) and merge result files at analysis time.
 
 # %%
 # ===== CELL 1: setup, configuration, persistence (run first, every session) =====
@@ -72,21 +74,24 @@ REF_CLASSIFIER = "distilbert-base-uncased-finetuned-sst-2-english"   # independe
 REF_EMBEDDER = "sentence-transformers/all-MiniLM-L6-v2"             # independent semantic-similarity check
 FAITH_FRACS = [0.1, 0.2, 0.3, 0.5]
 FAITH_N = 400                                 # sentences used for faithfulness (fixed random subset)
+IG_STEPS = 16                                 # Integrated-Gradients steps for the second attribution method
+IG_N = 300                                    # medium-strength pairs used for the IG-stability metric
+TOPK_FRAC = 0.2                               # top-k overlap uses the top 20% of aligned tokens
 LOG_EVERY = 250
 BASE_MODEL_NAME = "distilbert-base-uncased"
 
 DATASETS = {
     "sst2": dict(hf=("nyu-mll/glue", "sst2"), text="sentence", train="train", eval="validation",
                  max_len=64, truncate_words=None, shuffle_train=False, eval_n=None),
-    "rotten_tomatoes": dict(hf=("cornell-movie-review-data/rotten_tomatoes", None), text="text", train="train", eval="validation",
+    "rotten_tomatoes": dict(hf=("rotten_tomatoes", None), text="text", train="train", eval="validation",
                             max_len=64, truncate_words=None, shuffle_train=True, eval_n=None),
-    "imdb": dict(hf=("stanfordnlp/imdb", None), text="text", train="train", eval="test",
+    "imdb": dict(hf=("imdb", None), text="text", train="train", eval="test",
                  max_len=128, truncate_words=90, shuffle_train=True, eval_n=872),
 }
-
 SCALES = {
     "smoke": dict(train_size=120, epochs=1, ckpt_every=60, commit_ckpt_every=None, eval_limit=60),
     "small": dict(train_size=1500, epochs=1, ckpt_every=500, commit_ckpt_every=None, eval_limit=None),
+    "medium": dict(train_size=5000, epochs=1, ckpt_every=1000, commit_ckpt_every=2500, eval_limit=None),
     "large": dict(train_size=20000, epochs=2, ckpt_every=2000, commit_ckpt_every=6000, eval_limit=None),
 }
 CONDITIONS = {
@@ -96,6 +101,8 @@ CONDITIONS = {
     "lar_aligned":      dict(kind="lar", align="seq", dist="cos", lam=0.5),          # alignment-aware training loss
     "lar_pearson":      dict(kind="lar", align="seq", dist="pearson", lam=0.5),      # FAR-style correlation loss
     "pred_consistency": dict(kind="kl", lam=0.5),                           # symmetric KL between predictions
+    "lar_pearson_l0.1":  dict(kind="lar", align="seq", dist="pearson", lam=0.1),    # lambda sweep (accuracy/stability trade-off)
+    "lar_pearson_l0.25": dict(kind="lar", align="seq", dist="pearson", lam=0.25),
 }
 PHASES = {
     "S_smoke":               dict(dataset="sst2", scale="smoke", conditions=list(CONDITIONS)),
@@ -103,12 +110,27 @@ PHASES = {
                                   conditions=["ce_only_control", "aug_only", "lar_pos"]),
     "B_sst2_small_variants": dict(dataset="sst2", scale="small",
                                   conditions=["lar_aligned", "lar_pearson", "pred_consistency"]),
-    "C_rt_small_edited":            dict(dataset="rotten_tomatoes", scale="small",
+    "C_rt_small":            dict(dataset="rotten_tomatoes", scale="small",
                                   conditions=["ce_only_control", "aug_only", "lar_pos", "lar_aligned"]),
     "D_imdb_small":          dict(dataset="imdb", scale="small",
                                   conditions=["ce_only_control", "aug_only", "lar_pos", "lar_aligned"]),
     "E_sst2_large":          dict(dataset="sst2", scale="large",
-                                  conditions=["ce_only_control", "aug_only", "lar_pos", "lar_aligned"]),
+                                  conditions=["ce_only_control", "aug_only", "lar_pos", "lar_aligned", "lar_pearson"]),
+    # ---- v9.1/v9.2 phases (all add new metrics: top-k overlap, aligned Pearson, IG stability)
+    # H: lambda sweep for the Pearson loss at SST-2 large. 0.1 and 0.25 done on seeds 0-4; lambda=0.25 is the chosen setting
+    #    (knee of the curve: ~same stability as 0.5, no collapsed seed) -> complete its seeds 5-9.
+    "H_sst2_large_lambda":   dict(dataset="sst2", scale="large",
+                                  conditions=["lar_pearson_l0.1", "lar_pearson_l0.25"]),
+    # F: Rotten Tomatoes at full scale (8,530 training sentences x 2 epochs). lambda fixed to 0.25 BEFORE seeing this data.
+    "F_rt_large":            dict(dataset="rotten_tomatoes", scale="large",
+                                  conditions=["ce_only_control", "aug_only", "lar_aligned", "lar_pearson_l0.25"]),
+    # G: IMDB at reduced scale (long reviews make 20k x 2 epochs impractical): 5,000 x 1 epoch. lambda = 0.25.
+    "G_imdb_medium":         dict(dataset="imdb", scale="medium",
+                                  conditions=["ce_only_control", "aug_only", "lar_aligned", "lar_pearson_l0.25"]),
+    # E2: baselines (control, aug_only) re-run WITH the new metrics so the lambda variants have something to be compared to.
+    #     Separate analysis group; the pooled "newmetrics" analysis pairs these with the H rows by seed.
+    "E2_sst2_large_newmetrics": dict(dataset="sst2", scale="large", group="sst2_large_newmetrics",
+                                  conditions=["ce_only_control", "aug_only"]),
 }
 
 
@@ -565,6 +587,22 @@ def attr_and_pred(model, tok, text, max_len, target=None):
     return ids, attr, pred
 
 
+def ig_attr(model, tok, text, max_len, target):
+    """Integrated Gradients (PAD-embedding baseline for content tokens, CLS/SEP kept), |sum over embedding dim|.
+    A second, independent attribution method used only at evaluation time."""
+    enc = tok(text, return_tensors="pt", truncation=True, max_length=max_len).to(device)
+    with torch.no_grad():
+        emb = word_emb(model)(enc["input_ids"])
+        base = emb.clone()
+        base[:, 1:-1, :] = word_emb(model)(torch.tensor([[tok.pad_token_id]], device=device))
+    alphas = torch.linspace(1.0 / IG_STEPS, 1.0, IG_STEPS, device=device).view(-1, 1, 1)
+    x = (base + alphas * (emb - base)).detach().requires_grad_(True)           # [steps, L, D]
+    mask = torch.ones(IG_STEPS, emb.shape[1], dtype=torch.long, device=device)
+    logits = model(inputs_embeds=x, attention_mask=mask).logits[:, int(target)].sum()
+    grads = torch.autograd.grad(logits, x)[0].mean(0, keepdim=True)            # [1, L, D]
+    return ((emb - base) * grads).sum(-1).abs().squeeze(0).detach().cpu().numpy()
+
+
 @torch.no_grad()
 def accuracy_full(model, tok, texts, labels, max_len, bs=64):
     model.eval()
@@ -631,6 +669,7 @@ def evaluate_model(model, tok, data, bank_eval, max_len):
     per_strength = {}
     for sname in EVAL_STRENGTHS:
         r_seq, r_greedy, r_pos, cover, flips, pert_correct, n_pairs = [], [], [], [], [], 0, 0
+        r_pear, jac, ig_rho = [], [], []
         for i in range(len(texts)):
             var = bank_eval["entries"][str(i)][sname]["variants"]
             if not var:
@@ -648,6 +687,18 @@ def evaluate_model(model, tok, data, bank_eval, max_len):
                 if not math.isnan(r):
                     r_seq.append(r)
                     cover.append(len(ia) / max(1, len(co)))
+                    if np.std(ao[ia]) > 0 and np.std(ap[ib]) > 0:               # loss-matched metric (reported, not primary)
+                        r_pear.append(float(np.corrcoef(ao[ia], ap[ib])[0, 1]))
+                    k = max(1, int(round(TOPK_FRAC * len(ia))))                  # metric NOT optimised by any loss
+                    top_o = set(np.argsort(-ao[ia], kind="stable")[:k].tolist())
+                    top_p = set(np.argsort(-ap[ib], kind="stable")[:k].tolist())
+                    jac.append(len(top_o & top_p) / len(top_o | top_p))
+                    if sname == "medium" and len(ig_rho) < IG_N:                 # second attribution method
+                        g_o = ig_attr(model, tok, texts[i], max_len, labels[i])[1:-1]
+                        g_p = ig_attr(model, tok, var[0]["text"], max_len, labels[i])[1:-1]
+                        rg = _spearman(g_o[ia], g_p[ib])
+                        if not math.isnan(rg):
+                            ig_rho.append(rg)
             ga, gb = greedy_align(co, cp)
             if len(ga) >= 3:
                 r = _spearman(ao[ga], ap[gb])
@@ -660,6 +711,7 @@ def evaluate_model(model, tok, data, bank_eval, max_len):
                     r_pos.append(r)
         mean = lambda v: float(np.mean(v)) if v else float("nan")
         per_strength[sname] = dict(rho_seq=mean(r_seq), rho_greedy=mean(r_greedy), rho_positional=mean(r_pos),
+                                   rho_pearson=mean(r_pear), topk_jaccard=mean(jac), ig_rho=mean(ig_rho),
                                    coverage=mean(cover), n_valid_seq=len(r_seq), n_pairs=n_pairs,
                                    flip_rate=mean(flips), acc_pert=pert_correct / max(1, n_pairs))
     rs = random.Random(12345)
@@ -879,7 +931,8 @@ def run_phase(phase_name, conditions=None, seeds=None):
                   " ".join(f"{s}:rho={v['rho_seq']:.4f}" for s, v in per_strength.items()))
             store = load_store()
             for sname, v in per_strength.items():
-                store["rows"].append(dict(phase=phase_name, dataset=p["dataset"], scale=p["scale"], condition=cond_name,
+                store["rows"].append(dict(phase=phase_name, dataset=p["dataset"], scale=p["scale"],
+                                          group=p.get("group", f"{p['dataset']}_{p['scale']}"), condition=cond_name,
                                           seed=seed, strength=sname, protocol=PROTOCOL_VERSION, config_hash=fp,
                                           train_size=sc_cfg["train_size"], epochs=sc_cfg["epochs"],
                                           train_seconds=round(t_train, 1), **model_metrics, **v))
@@ -914,19 +967,26 @@ ANALYSIS_DIR = os.path.join(RUN_DIR, "analysis")
 os.makedirs(ANALYSIS_DIR, exist_ok=True)
 HOLM_FAMILY = ["lar_pos", "lar_aligned", "lar_pearson", "pred_consistency"]   # each tested vs aug_only (primary family)
 REF_FOR_AUG = "aug_only"
+MODEL_METRICS = ["acc_full", "comp_gain", "suff_gain"]
 
 
 def load_df(include_smoke=False):
+    """All rows. `group` = analysis group (default dataset_scale); rows written before v9.1 get it filled in."""
     df = pd.DataFrame(load_store()["rows"])
     if df.empty:
         return df
     if not include_smoke:
         df = df[~df.phase.str.startswith("S_")]
-    # a (dataset, scale, condition, seed, strength) must be unique across phases; keep the first and warn
-    key = ["dataset", "scale", "condition", "seed", "strength"]
+    if "group" not in df:
+        df["group"] = np.nan
+    df["group"] = df["group"].fillna(df["dataset"] + "_" + df["scale"])
+    for m in ("topk_jaccard", "rho_pearson", "ig_rho"):
+        if m not in df:
+            df[m] = np.nan
+    key = ["group", "condition", "seed", "strength"]
     dup = df.duplicated(key, keep="first")
     if dup.any():
-        print(f"WARNING: {int(dup.sum())} duplicate rows across phases dropped")
+        print(f"WARNING: {int(dup.sum())} duplicate rows within a group dropped (keep first)")
     return df[~dup]
 
 
@@ -941,7 +1001,8 @@ def holm(pvals):
 
 
 def paired_contrast(df, metric, treat, ref, group_cols, n_boot=10000, seed=0):
-    """Paired-by-seed contrast of `treat` minus `ref` for one metric inside each group."""
+    """Paired-by-seed contrast of `treat` minus `ref` for one metric inside each group.
+    NOTE: with 10 seeds the percentile-bootstrap CI is slightly optimistic; prefer p_t / the t-interval when they disagree."""
     rows = []
     for g, sub in df.groupby(group_cols):
         w = sub.pivot_table(index="seed", columns="condition", values=metric)
@@ -954,6 +1015,7 @@ def paired_contrast(df, metric, treat, ref, group_cols, n_boot=10000, seed=0):
         boots = [d.values[rng.randint(0, len(d), len(d))].mean() for _ in range(n_boot)]
         sd = d.std(ddof=1)
         t = sst.ttest_rel(w.loc[d.index, treat], w.loc[d.index, ref])
+        tci = sst.t.interval(0.95, len(d) - 1, d.mean(), sd / np.sqrt(len(d))) if sd > 0 else (np.nan, np.nan)
         try:
             wp = sst.wilcoxon(d).pvalue
         except ValueError:
@@ -961,9 +1023,15 @@ def paired_contrast(df, metric, treat, ref, group_cols, n_boot=10000, seed=0):
         g = g if isinstance(g, tuple) else (g,)
         rows.append(dict(zip(group_cols, g), metric=metric, treat=treat, ref=ref, n_seeds=len(d),
                          mean_diff=d.mean(), ci_lo=np.percentile(boots, 2.5), ci_hi=np.percentile(boots, 97.5),
+                         t_ci_lo=tci[0], t_ci_hi=tci[1],
                          d_z=d.mean() / sd if sd > 0 else float("nan"), p_t=t.pvalue, p_wilcoxon=wp,
                          n_pos=int((d > 0).sum())))
     return pd.DataFrame(rows)
+
+
+def _cat(frames):
+    frames = [f for f in frames if len(f)]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 def run_analysis(verbose=True):
@@ -971,60 +1039,101 @@ def run_analysis(verbose=True):
     if df.empty:
         print("no results yet"); return None
     out = {}
-    strength_groups = ["dataset", "scale", "strength"]
-    model_groups = ["dataset", "scale"]
-    model_df = df.drop_duplicates(["dataset", "scale", "condition", "seed"])
+    sg, mg = ["group", "strength"], ["group"]
+    model_df = df.drop_duplicates(["group", "condition", "seed"])
+    present = set(df.condition)
+    treatments = [c for c in HOLM_FAMILY if c in present] + sorted(c for c in present if c.startswith("lar_pearson_l"))
 
-    # 1) primary family: stability (rho_seq) of each treatment vs aug_only, Holm-corrected within dataset/scale/strength
-    prim = []
-    for tr in HOLM_FAMILY:
-        prim.append(paired_contrast(df, "rho_seq", tr, REF_FOR_AUG, strength_groups))
-    prim = pd.concat([p for p in prim if len(p)], ignore_index=True) if any(len(p) for p in prim) else pd.DataFrame()
+    # 1) primary family (Holm within group/strength): stability of each treatment vs aug_only
+    prim = _cat([paired_contrast(df, "rho_seq", tr, REF_FOR_AUG, sg) for tr in treatments])
     if len(prim):
         prim["p_holm"] = np.nan
-        for _, idx in prim.groupby(strength_groups).groups.items():
+        for _, idx in prim.groupby(sg).groups.items():
             prim.loc[idx, "p_holm"] = holm(prim.loc[idx, "p_t"].values)
     out["primary_vs_aug"] = prim
 
-    # 2) context contrasts (descriptive, not in the Holm family)
-    ctx = pd.concat([paired_contrast(df, "rho_seq", "lar_pos", "ce_only_control", strength_groups),
-                     paired_contrast(df, "rho_seq", "aug_only", "ce_only_control", strength_groups)], ignore_index=True)
-    out["context"] = ctx
+    # 2) metrics NOT matched to a training loss (top-k overlap) + loss-matched Pearson + IG stability (medium only)
+    out["secondary_metrics_vs_aug"] = _cat([paired_contrast(df, m, tr, REF_FOR_AUG, sg)
+                                            for m in ["topk_jaccard", "rho_pearson", "ig_rho"] for tr in treatments])
 
-    # 3) accuracy / faithfulness / robustness side-effects (model-level metrics), every treatment vs aug_only
-    side = []
-    for m in ["acc_full", "comp_gain", "suff_gain"]:
-        for tr in HOLM_FAMILY + ["ce_only_control"]:
-            side.append(paired_contrast(model_df, m, tr, REF_FOR_AUG, model_groups))
-    side.append(paired_contrast(df, "flip_rate", "lar_pos", REF_FOR_AUG, strength_groups))
-    out["side_effects"] = pd.concat([s for s in side if len(s)], ignore_index=True) if any(len(s) for s in side) else pd.DataFrame()
+    # 2b) pooled "new metrics" analysis: rows that HAVE the new metrics, from any group of the same dataset/scale,
+    #     paired by seed (e.g. H lambda rows vs E2 baselines). Never mixes models that lack the metrics.
+    nm = df[df.topk_jaccard.notna()].copy()
+    if len(nm):
+        nm["group"] = nm["dataset"] + "_" + nm["scale"] + "_nm"
+        nm_treat = sorted(c for c in set(nm.condition) if c not in ("ce_only_control", "aug_only"))
+        nm_model = nm.drop_duplicates(["group", "condition", "seed"])
+        parts = [paired_contrast(nm, m, tr, REF_FOR_AUG, sg) for m in ["rho_seq", "topk_jaccard", "rho_pearson", "ig_rho"] for tr in nm_treat]
+        parts += [paired_contrast(nm, m, "ce_only_control", REF_FOR_AUG, sg) for m in ["rho_seq", "topk_jaccard", "ig_rho"]]
+        parts += [paired_contrast(nm_model, m, tr, REF_FOR_AUG, mg) for m in MODEL_METRICS for tr in nm_treat]
+        out["newmetrics_vs_aug"] = _cat(parts)
 
-    # 4) controlled alignment-artifact ablation: same models, three alignment procedures
-    art = df.groupby(["dataset", "scale", "condition", "strength"])[["rho_positional", "rho_greedy", "rho_seq", "coverage"]].mean().reset_index()
-    out["alignment_ablation"] = art
+    # 3) context contrasts (descriptive)
+    out["context"] = _cat([paired_contrast(df, "rho_seq", a, b, sg) for a, b in
+                           [("lar_pos", "ce_only_control"), ("aug_only", "ce_only_control"),
+                            ("lar_aligned", "lar_pos"), ("lar_pearson", "lar_aligned"), ("lar_pearson", "lar_pos")]])
 
-    # 5) descriptive table: mean (sd) over seeds
-    desc = df.groupby(["dataset", "scale", "condition", "strength"]).rho_seq.agg(["mean", "std", "count"]).reset_index()
-    out["descriptive"] = desc
-    mdesc = model_df.groupby(["dataset", "scale", "condition"])[["acc_full", "comp_gain", "suff_gain"]].agg(["mean", "std"]).reset_index()
-    out["model_descriptive"] = mdesc
+    # 4) accuracy / faithfulness side effects (model-level) vs aug_only; accuracy also vs control
+    side = [paired_contrast(model_df, m, tr, REF_FOR_AUG, mg) for m in MODEL_METRICS for tr in treatments + ["ce_only_control"]]
+    side += [paired_contrast(model_df, "acc_full", tr, "ce_only_control", mg) for tr in treatments]
+    out["side_effects"] = _cat(side)
+
+    # 5) controlled alignment-artifact ablation: same models, three alignment procedures
+    out["alignment_ablation"] = df.groupby(["group", "condition", "strength"])[
+        ["rho_positional", "rho_greedy", "rho_seq", "coverage"]].mean().reset_index()
+
+    # 6) descriptive table
+    out["descriptive"] = df.groupby(["group", "condition", "strength"])[
+        ["rho_seq", "topk_jaccard", "rho_pearson", "ig_rho"]].agg(["mean", "std", "count"])
 
     for k, v in out.items():
         if len(v):
-            v.to_csv(os.path.join(ANALYSIS_DIR, f"{k}.csv"), index=False)
+            v.to_csv(os.path.join(ANALYSIS_DIR, f"{k}.csv"))
     if verbose:
-        pd.set_option("display.width", 220, "display.max_columns", 30)
-        for k in ["primary_vs_aug", "context", "alignment_ablation", "model_descriptive"]:
+        pd.set_option("display.width", 240, "display.max_columns", 40)
+        for k in ["primary_vs_aug", "newmetrics_vs_aug", "secondary_metrics_vs_aug", "context", "side_effects", "alignment_ablation"]:
+            if k not in out:
+                continue
             print(f"\n----- {k} -----")
             print(out[k].round(4).to_string(index=False) if len(out[k]) else "(nothing yet)")
         print(f"\nCSV files written to {ANALYSIS_DIR}")
     return out
 
 
-def gate_report():
-    """Stage-0 decision: does LAR still beat the augmentation-only control? Read the CI, not just the p-value."""
+def tradeoff_report(group="sst2_large", seeds="common"):
+    """Stability gain versus accuracy cost per condition (medium strength) - use it to choose lambda.
+    seeds="common" (default): only seeds present for EVERY condition, so means are paired and comparable;
+    seeds="all": every available seed (means then rest on different seeds - do not read differences from it);
+    or pass an explicit list of seeds."""
     df = load_df()
-    df = df[(df.dataset == "sst2") & (df.scale == "small")]
+    df = df[df.group == group]
+    if df.empty:
+        print("no rows for", group); return None
+    per_cond = df.groupby("condition").seed.apply(set)
+    if seeds == "common":
+        use = set.intersection(*per_cond.values)
+    elif seeds == "all":
+        use = set(df.seed)
+    else:
+        use = set(seeds)
+    df = df[df.seed.isin(use)]
+    print(f"seeds used: {sorted(use)}  | seeds available per condition: " + ", ".join(f"{c}={len(s)}" for c, s in per_cond.items()))
+    m = df.drop_duplicates(["condition", "seed"]).set_index(["condition", "seed"])
+    med = df[df.strength == "medium"].set_index(["condition", "seed"])
+    t = pd.DataFrame({"rho_medium": med.rho_seq, "topk_jaccard": med.topk_jaccard, "ig_rho": med.ig_rho,
+                      "acc_full": m.acc_full, "comp_gain": m.comp_gain}).groupby("condition").agg(["mean", "std"])
+    if REF_FOR_AUG in t.index:
+        t[("acc_vs_aug", "mean")] = t[("acc_full", "mean")] - t.loc[REF_FOR_AUG, ("acc_full", "mean")]
+        t[("rho_vs_aug", "mean")] = t[("rho_medium", "mean")] - t.loc[REF_FOR_AUG, ("rho_medium", "mean")]
+    pd.set_option("display.width", 240, "display.max_columns", 40)
+    print(t.round(4).sort_values(("rho_medium", "mean")).to_string())
+    return t
+
+
+def gate_report():
+    """Stage-0 decision at small scale: does LAR still beat the augmentation-only control?"""
+    df = load_df()
+    df = df[df.group == "sst2_small"]
     if df.empty:
         print("phase A not run yet"); return
     for tr in ["lar_pos", "aug_only"]:
@@ -1032,15 +1141,12 @@ def gate_report():
         c = paired_contrast(df, "rho_seq", tr, ref, ["strength"])
         print(f"\n{tr} - {ref}  (rho_seq, paired by seed)")
         print(c[["strength", "n_seeds", "mean_diff", "ci_lo", "ci_hi", "d_z", "p_t", "p_wilcoxon", "n_pos"]].round(4).to_string(index=False))
-    print("\nReading guide: LAR - aug_only with a 95% CI clearly above 0 => the attribution term adds something beyond "
-          "data exposure (proceed). CI spanning 0 and aug_only - control clearly >0 => the gain is mostly augmentation "
-          "(reframe the paper around the measurement fix + controlled study).")
 
 
-def latex_main_table(dataset="sst2", scale="small", conditions=None, path=None):
+def latex_main_table(group="sst2_large", conditions=None, path=None):
     """Mean (sd) of rho_seq per condition x strength, plus Holm-adjusted p vs aug_only, as a booktabs table."""
     df = load_df()
-    df = df[(df.dataset == dataset) & (df.scale == scale)]
+    df = df[df.group == group]
     conditions = conditions or [c for c in CONDITIONS if c in set(df.condition)]
     prim = run_analysis(verbose=False)["primary_vs_aug"]
     lines = [r"\begin{tabular}{@{}lccc@{}}", r"\toprule", r"Condition & Light & Medium & Heavy \\", r"\midrule"]
@@ -1050,16 +1156,16 @@ def latex_main_table(dataset="sst2", scale="small", conditions=None, path=None):
             v = df[(df.condition == c) & (df.strength == s)].rho_seq
             cell = f"{v.mean():.4f} ({v.std():.4f})" if len(v) else "--"
             if len(prim):
-                m = prim[(prim.dataset == dataset) & (prim.scale == scale) & (prim.strength == s) & (prim.treat == c)]
-                if len(m):
-                    cell += r"$^{\dagger}$" if m.p_holm.iloc[0] < 0.05 else ""
+                m = prim[(prim.group == group) & (prim.strength == s) & (prim.treat == c)]
+                if len(m) and m.p_holm.iloc[0] < 0.05:
+                    cell += r"$^{\dagger}$"
             cells.append(cell)
         name = c.replace("_", "\\_")
         lines.append(name + " & " + " & ".join(cells) + r" \\")
     lines += [r"\bottomrule", r"\end{tabular}",
               r"% $\dagger$: Holm-adjusted paired-$t$ p<0.05 versus aug\_only"]
     tex = "\n".join(lines)
-    path = path or os.path.join(ANALYSIS_DIR, f"table_{dataset}_{scale}.tex")
+    path = path or os.path.join(ANALYSIS_DIR, f"table_{group}.tex")
     with open(path, "w") as f:
         f.write(tex)
     print(tex)
@@ -1072,52 +1178,126 @@ def export_bundle():
     shutil.make_archive(base, "zip", RUN_DIR, ".")
     print("wrote", base + ".zip")
 
+# %%
+# ===== CELL 6: dataset statistics for the paper's "Datasets" section (run after cells 1-5; needs internet for HF data) =====
+DS_STAT_COMBOS = [("sst2", "large"), ("rotten_tomatoes", "large"), ("imdb", "medium")]
+
+
+def _describe(vals):
+    v = np.asarray(vals, dtype=float)
+    return dict(mean=float(v.mean()), median=float(np.median(v)), p90=float(np.percentile(v, 90)), max=float(v.max()))
+
+
+def _split_stats(texts, labels, tok, max_len):
+    words = [len(t.split()) for t in texts]
+    ntok = [len(tok(t, add_special_tokens=True, truncation=False)["input_ids"]) for t in texts]
+    ks = [len(find_candidates(t.split())) if t.split() else 0 for t in texts]
+    return dict(n=len(texts), positive_frac=float(np.mean(labels)), words=_describe(words), wordpieces=_describe(ntok),
+                truncated_frac=float(np.mean([n > max_len for n in ntok])),
+                candidates_mean=float(np.mean(ks)), with_candidate_frac=float(np.mean([k > 0 for k in ks])))
+
+
+def _bank_stats(dataset, n_train, n_eval):
+    out = {}
+    p_tr, p_ev = (os.path.join(BANK_DIR, f"bank__{kind}__{dataset}__n{n}.json") for kind, n in (("train", n_train), ("eval", n_eval)))
+    if os.path.exists(p_tr):
+        T = json.load(open(p_tr))["entries"]
+        acc = [e["train"]["variants"][0] for e in T.values() if e["train"]["variants"]]
+        out["train"] = dict(with_validated_variant_frac=len(acc) / max(1, len(T)),
+                            with_two_variants_frac=float(np.mean([len(e["train"]["variants"]) >= 2 for e in T.values()])),
+                            mean_swaps=float(np.mean([a["n_swaps"] for a in acc])) if acc else None,
+                            mean_similarity=float(np.mean([a["sim"] for a in acc])) if acc else None)
+    if os.path.exists(p_ev):
+        E = json.load(open(p_ev))["entries"]
+        out["eval"] = {}
+        for s in EVAL_STRENGTHS:
+            has_c = sum(1 for e in E.values() if e[s]["n_drafts"] > 0)
+            acc = [e[s]["variants"][0] for e in E.values() if e[s]["variants"]]
+            out["eval"][s] = dict(with_candidates=has_c, accepted=len(acc), acceptance_of_candidates=len(acc) / max(1, has_c),
+                                  mean_swaps=float(np.mean([a["n_swaps"] for a in acc])) if acc else None,
+                                  realised_frac_of_eligible=float(np.mean([a["n_swaps"] / a["k"] for a in acc])) if acc else None,
+                                  realised_frac_of_words=float(np.mean([a["n_swaps"] / a["nwords"] for a in acc])) if acc else None,
+                                  mean_similarity=float(np.mean([a["sim"] for a in acc])) if acc else None)
+    return out
+
+
+def dataset_statistics(combos=None, tok=None, save=True):
+    """Per (dataset, scale): statistics of the training subset actually used and of the evaluation set, plus the
+    perturbation-bank acceptance numbers if the banks are on disk. Writes dataset_stats.json and tab_datasets.tex."""
+    tok = tok or AutoTokenizer.from_pretrained(BASE_MODEL_NAME)
+    stats = {}
+    for dataset, scale in (combos or DS_STAT_COMBOS):
+        print(f"--- {dataset} / {scale}")
+        data = load_phase_data(dataset, scale)
+        ml = DATASETS[dataset]["max_len"]
+        stats[f"{dataset}_{scale}"] = dict(
+            dataset=dataset, scale=scale, max_len=ml, train_used=_split_stats(data["train_texts"], data["train_labels"], tok, ml),
+            eval=_split_stats(data["eval_texts"], data["eval_labels"], tok, ml),
+            banks=_bank_stats(dataset, len(data["train_texts"]), len(data["eval_texts"])))
+    if save:
+        with open(os.path.join(RUN_DIR, "dataset_stats.json"), "w") as f:
+            json.dump(stats, f, indent=1)
+        rows = [r"\begin{tabular}{@{}llrrrrrrr@{}}", r"\toprule",
+                r"Dataset & Split & $n$ & Pos.\ (\%) & Words (mean/med.) & Word-pieces (mean/p90) & $>$max len (\%) & Cand.\ / ex. & With cand.\ (\%) \\", r"\midrule"]
+        for key, d in stats.items():
+            for split, label in (("train_used", "train (used)"), ("eval", "eval")):
+                s = d[split]
+                rows.append(f"{d['dataset'].replace('_', ' ')} ({d['scale']}) & {label} & {s['n']:,} & {100 * s['positive_frac']:.1f} & "
+                            f"{s['words']['mean']:.1f}/{s['words']['median']:.0f} & {s['wordpieces']['mean']:.1f}/{s['wordpieces']['p90']:.0f} & "
+                            f"{100 * s['truncated_frac']:.1f} & {s['candidates_mean']:.2f} & {100 * s['with_candidate_frac']:.1f} \\\\")
+        rows += [r"\bottomrule", r"\end{tabular}"]
+        with open(os.path.join(RUN_DIR, "tab_datasets.tex"), "w") as f:
+            f.write("\n".join(rows))
+        print("wrote dataset_stats.json and tab_datasets.tex to", RUN_DIR)
+    return stats
+
 # %% [markdown]
-# ## Phase S — smoke test (run this first, once)
-# Tiny run of all six conditions on one seed to confirm paths, banks, checkpoints, evaluation and auto-commit. Note the `s/step` printed per condition on your GPU and send it back so the full budget can be planned. Then `reset_phase("S_smoke")` so it never touches real results (analysis already ignores `S_` phases).
+# ## Already completed (kept for reference — skipped automatically when their rows exist)
+# S (smoke), A (SST-2 small core), B (SST-2 small variants), E (SST-2 large, 5 conditions × 10 seeds), H on seeds 0–4 (`lar_pearson_l0.1`, `lar_pearson_l0.25`).
 
 # %%
-run_phase("S_smoke", seeds=[0])   # plumbing check only; analysis needs >=3 seeds
-
-# %%
-# reset_phase("S_smoke")   # uncomment after you have looked at the smoke output
+# run_phase("A_sst2_small_core")
+# run_phase("B_sst2_small_variants")
+# run_phase("E_sst2_large")
+# run_phase("H_sst2_large_lambda", seeds=[0, 1, 2, 3, 4])
 
 # %% [markdown]
-# ## Phase A — SST-2, small scale: control / augmentation-only / LAR (as in v8)  → the decisive gate
-# 1,500 training examples, 1 epoch, seeds 0–9. After it finishes, `gate_report()` answers: *does LAR still beat augmentation-only?*
+# ## Phase H (continued) — finish λ = 0.25 on seeds 5–9
+# λ = 0.25 is the chosen setting, so it needs the full 10 seeds (≈ 46 min per run ≈ 3.8 GPU-hours). λ = 0.1 stays at 5 seeds as a sensitivity point (run `conditions=["lar_pearson_l0.1"], seeds=[5,6,7,8,9]` only if you want a 10-seed dose-response).
 
 # %%
-run_phase("A_sst2_small_core")
-
-# %%
-gate_report()
+run_phase("H_sst2_large_lambda", conditions=["lar_pearson_l0.25"], seeds=[5, 6, 7, 8, 9])
 
 # %% [markdown]
-# ## Phase B — SST-2, small scale: alignment-aware LAR, correlation-loss LAR, prediction-consistency baseline
-# Run after the gate (or earlier if you prefer; it shares banks/seeds with phase A).
+# ## Phase E2 — baselines with the new metrics (SST-2 large, seeds 0–4)
+# Needed so `topk_jaccard` and `ig_rho` of the λ variants can be compared with control / aug_only. ≈ 29 min per run, ≈ 4.8 GPU-hours for 5 seeds × 2 conditions. Extend to seeds 5–9 after the λ = 0.25 seeds 5–9 finish if you want 10 paired seeds.
 
 # %%
-run_phase("B_sst2_small_variants")
+run_phase("E2_sst2_large_newmetrics", seeds=[0, 1, 2, 3, 4])
+# run_phase("E2_sst2_large_newmetrics", seeds=[5, 6, 7, 8, 9])
 
 # %% [markdown]
-# ## Phase C — Rotten Tomatoes, small scale (second dataset)
+# ## Phase F — Rotten Tomatoes, full scale (8,530 sentences × 2 epochs ≈ 17k steps)
+# Conditions: control, aug_only, `lar_aligned`, `lar_pearson_l0.25`. Estimated ≈ 85 min per seed for the four conditions (extrapolated from SST-2 timings — read s/step in the first run). Run seeds 0–4 first.
 
 # %%
-run_phase("C_rt_small")
+run_phase("F_rt_large", seeds=[0, 1, 2, 3, 4])
+# run_phase("F_rt_large", seeds=[5, 6, 7, 8, 9])
 
 # %% [markdown]
-# ## Phase D — IMDB (long reviews, truncated to 90 words / 128 tokens), small scale (third dataset)
-# Sequences are ~2× longer than SST-2, so each LAR step is slower; check `s/step` in the log.
+# ## Phase G — IMDB, reduced scale (5,000 × 1 epoch; reviews truncated to 90 words / 128 tokens)
+# 20,000 × 2 epochs would need ≈ 40+ GPU-hours per seed (extrapolated), so IMDB uses a reduced budget. Read s/step from the first run before committing to all seeds.
 
 # %%
-run_phase("D_imdb_small")
+run_phase("G_imdb_medium", seeds=[0, 1, 2, 3, 4])
+# run_phase("G_imdb_medium", seeds=[5, 6, 7, 8, 9])
 
 # %% [markdown]
-# ## Phase E — SST-2, large scale (20,000 × 2 epochs) under the new protocol
-# Heaviest phase. Edit `PHASES['E_sst2_large']['conditions']` in cell 1 **before the first run** to keep only the conditions you need after seeing phases A–B (e.g. drop `lar_pos` or `lar_aligned`). Checkpoints are committed to the dataset every 6,000 steps so a stopped session resumes mid-seed.
+# ## Dataset statistics for the paper (run once; needs the datasets and the banks on disk)
+# Run after the banks of the phases you care about exist (banks are built the first time a phase runs; the SST-2 banks are restored from your dataset).
 
 # %%
-run_phase("E_sst2_large")
+ds_stats = dataset_statistics()
 
 # %% [markdown]
 # ## Analysis, tables, export
@@ -1127,9 +1307,12 @@ run_phase("E_sst2_large")
 out = run_analysis()
 
 # %%
-latex_main_table("sst2", "small")
-# latex_main_table("rotten_tomatoes", "small"); latex_main_table("imdb", "small"); latex_main_table("sst2", "large")
+tradeoff_report("sst2_large")                 # common seeds only (paired)
+# tradeoff_report("rotten_tomatoes_large"); tradeoff_report("imdb_medium")
+
+# %%
+latex_main_table("sst2_large")
+# latex_main_table("rotten_tomatoes_large"); latex_main_table("imdb_medium"); latex_main_table("sst2_small")
 
 # %%
 export_bundle()   # zips results + analysis + banks; download from the Output tab
-

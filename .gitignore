@@ -2,8 +2,20 @@
 venv/
 data/
 logs/
+sessions/
 
 __pycache__/
 *.py[cod]
 
 *.txt
+audit.log
+
+# Test and development files
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE and OS files
+.vscode/
+.DS_Store
+Thumbs.db
