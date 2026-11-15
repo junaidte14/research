@@ -41,11 +41,26 @@ def run_agent_turn(
 
         # step 4: execute each requested tool
         for tool_call in tool_calls:
-            tool_id = tool_call["id"]
-            function = tool_call["function"]
+            try:
+                tool_id = tool_call["id"]
+                function = tool_call["function"]
 
-            tool_name = function["name"]
-            arguments = function["arguments"]
+                tool_name = function["name"]
+                arguments = function["arguments"]
+
+                if not isinstance(tool_id, str) or not tool_id.strip():
+                    raise ValueError("Invalid tool call ID")
+
+                if not isinstance(tool_name, str) or not tool_name.strip():
+                    raise ValueError("Invalid tool name")
+
+                if not isinstance(arguments, str):
+                    raise ValueError("Tool arguments must be a JSON string")
+
+            except (KeyError, TypeError, ValueError) as error:
+                raise RuntimeError(
+                    f"Malformed tool call received from LLM: {error}"
+                ) from error
 
             print(f"[Agent] calling tool: {tool_name} with arguments: {arguments}")
 
