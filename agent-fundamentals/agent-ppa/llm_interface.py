@@ -10,3 +10,6 @@ class LLMClient(Protocol):
 
     def complete(self, messages: list[dict[str, str]]) -> str:
         ...
+
+    def complete_with_tools(self, messages: list[dict[str, any]], tools: list[dict[str, any]]) -> dict[str, any]:
+        ...
