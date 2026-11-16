@@ -50,4 +50,4 @@ def test_invalid_json():
 
 def test_missing_argument():
     result = execute_tool("calculator", "{}")
-    assert "Invalid tool arguments" in result
+    assert "Invalid arguments" in result
