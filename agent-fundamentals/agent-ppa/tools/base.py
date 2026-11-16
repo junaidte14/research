@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Any
 from pydantic import BaseModel, ValidationError
 
 @dataclass
@@ -9,6 +9,7 @@ class Tool:
     args_schema: type[BaseModel]
     function: Callable[..., str]
     required_permission: str
+    requires_approval: bool = False
 
     def to_llm_definition(self) -> dict:
         """
@@ -24,7 +25,11 @@ class Tool:
             }
         }
 
-    def execute(self, arguments_json: str) -> str:
+    def execute(
+            self, 
+            arguments_json: str,
+            approval_callback: Callable[[str, dict[str, Any]], bool] | None = None
+        ) -> str:
         """
         Validate arguments and execute the Python function.
         """
@@ -33,6 +38,20 @@ class Tool:
             validated_arguments = (
                 self.args_schema.model_validate_json(arguments_json)
             )
+
+            # Require explicit approval for sensitive tools
+            if self.requires_approval:
+                if approval_callback is None:
+                    return (
+                        "Tool approval error: No approval handler "
+                        "configured. Action is blocked."
+                    )
+                approved = approval_callback(
+                    self.name,
+                    validated_arguments.model_dump()
+                )
+                if approved is not True:
+                    return "Tool execution cancelled by user."
 
             result = self.function(**validated_arguments.model_dump())
 

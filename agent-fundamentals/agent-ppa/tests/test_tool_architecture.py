@@ -106,3 +106,79 @@ def test_authorization_precedes_argument_validation():
 
     assert "Tool authorization error" in result
     assert "Invalid arguments" not in result
+
+
+def test_approved_action_executes():
+    policy = ToolPolicy(
+        allowed_permissions=frozenset({"message:send"})
+    )
+
+    def approve_action(tool_name, arguments):
+        assert tool_name == "send_message"
+        assert arguments["recipient"] == "test@example.com"
+        return True
+
+    result = execute_tool(
+        "send_message",
+        '{"recipient":"test@example.com","message":"Hello"}',
+        policy=policy,
+        approval_callback=approve_action
+    )
+
+    assert "SIMULATION ONLY" in result
+
+
+def test_rejected_action_does_not_execute():
+    policy = ToolPolicy(
+        allowed_permissions=frozenset({"message:send"})
+    )
+
+    def reject_action(tool_name, arguments):
+        return False
+
+    result = execute_tool(
+        "send_message",
+        '{"recipient":"test@example.com","message":"Hello"}',
+        policy=policy,
+        approval_callback=reject_action
+    )
+
+    assert "cancelled by user" in result
+
+
+def test_approval_required_but_no_handler():
+    policy = ToolPolicy(
+        allowed_permissions=frozenset({"message:send"})
+    )
+
+    result = execute_tool(
+        "send_message",
+        '{"recipient":"test@example.com","message":"Hello"}',
+        policy=policy
+    )
+
+    assert "No approval handler" in result
+    assert "blocked" in result
+
+
+def test_unauthorized_action_never_requests_approval():
+    policy = ToolPolicy(
+        allowed_permissions=frozenset()
+    )
+
+    approval_called = False
+
+    def approve_action(tool_name, arguments):
+        nonlocal approval_called
+        approval_called = True
+        return True
+
+    result = execute_tool(
+        "send_message",
+        '{"recipient":"test@example.com","message":"Hello"}',
+        policy=policy,
+        approval_callback=approve_action
+    )
+
+    assert "Tool authorization error" in result
+    assert approval_called is False

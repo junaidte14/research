@@ -30,3 +30,20 @@ class TextAnalyzerInput(BaseModel):
     text: str = Field(
         description="The text to analyze."
     )
+
+class MessageInput(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True
+    )
+
+    recipient: str = Field(
+        min_length=1,
+        description="The intended message recipient."
+    )
+
+    message: str = Field(
+        min_length=1,
+        max_length=1000,
+        description="The message to send."
+    )

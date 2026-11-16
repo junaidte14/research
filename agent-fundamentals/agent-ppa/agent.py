@@ -1,8 +1,41 @@
+import json
 from typing import Any
 from llm_interface import LLMClient
 from tools.registry import (TOOL_DEFINITIONS, execute_tool)
 
 MAX_TOOL_ROUNDS = 5
+
+
+def request_tool_approval(
+    tool_name: str,
+    arguments: dict[str, Any]
+) -> bool:
+    """
+    Ask the human to approve a validated tool action.
+    """
+
+    print("\n" + "=" * 50)
+    print("HUMAN APPROVAL REQUIRED")
+    print("=" * 50)
+
+    print(f"Tool: {tool_name}")
+    print("Validated arguments:")
+
+    print(
+        json.dumps(
+            arguments,
+            indent=4,
+            ensure_ascii=False
+        )
+    )
+
+    print("=" * 50)
+
+    decision = input(
+        "Approve this action? (yes/no): "
+    ).strip().lower()
+
+    return decision in {"yes", "y"}
 
 def run_agent_turn(
     llm: LLMClient,
@@ -64,7 +97,11 @@ def run_agent_turn(
 
             print(f"[Agent] calling tool: {tool_name} with arguments: {arguments}")
 
-            result = execute_tool(tool_name=tool_name, arguments=arguments)
+            result = execute_tool(
+                tool_name=tool_name, 
+                arguments=arguments, 
+                approval_callback=request_tool_approval
+            )
 
             print(f"[Agent] Tool result: {result}")
 

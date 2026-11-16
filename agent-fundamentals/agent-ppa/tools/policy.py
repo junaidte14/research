@@ -14,6 +14,7 @@ DEFAULT_TOOL_POLICY = ToolPolicy(
     allowed_permissions=frozenset({
         "math:calculate",
         "system:read_time",
-        "text:analyze"
+        "text:analyze",
+        "message:send"
     })
 )

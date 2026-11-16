@@ -1,14 +1,17 @@
+from typing import Any, Callable
 from tools.base import Tool
 from tools.policy import DEFAULT_TOOL_POLICY, ToolPolicy
 
 from tools.calculator import calculator
 from tools.date_time import get_current_datetime
 from tools.text_analyzer import analyze_text
+from tools.messaging import send_message
 
 from tools.schemas import (
     CalculatorInput,
     DateTimeInput,
-    TextAnalyzerInput
+    TextAnalyzerInput,
+    MessageInput
 )
 
 # single source of truth for registered tools
@@ -44,7 +47,18 @@ TOOLS = [
         args_schema=TextAnalyzerInput,
         function=analyze_text,
         required_permission="text:analyze"
-    )
+    ),
+    Tool(
+        name="send_message",
+        description=(
+            "Simulate sending a message to a recipient. "
+            "This tool requires human approval before execution."
+        ),
+        args_schema=MessageInput,
+        function=send_message,
+        required_permission="message:send",
+        requires_approval=True
+    ),
 ]
 
 # Build lookup structures from the tool definitions
@@ -60,7 +74,8 @@ TOOL_DEFINITIONS = [
 def execute_tool(
         tool_name: str, 
         arguments: str,
-        policy: ToolPolicy = DEFAULT_TOOL_POLICY
+        policy: ToolPolicy = DEFAULT_TOOL_POLICY,
+        approval_callback: Callable[[str, dict[str, Any]], bool] | None = None
     ) -> str:
     tool = TOOL_REGISTRY.get(tool_name)
 
@@ -75,4 +90,7 @@ def execute_tool(
             "is not allowed."
         )
     
-    return tool.execute(arguments)
+    return tool.execute(
+        arguments,
+        approval_callback=approval_callback
+    )
