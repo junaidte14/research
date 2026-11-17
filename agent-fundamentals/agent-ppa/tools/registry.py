@@ -1,6 +1,7 @@
 from typing import Any, Callable
 from tools.base import Tool
 from tools.policy import DEFAULT_TOOL_POLICY, ToolPolicy
+from tools.audit import write_audit_event
 
 from tools.calculator import calculator
 from tools.date_time import get_current_datetime
@@ -51,8 +52,8 @@ TOOLS = [
     Tool(
         name="send_message",
         description=(
-            "Simulate sending a message to a recipient. "
-            "This tool requires human approval before execution."
+            "Simulate sending a message to the specified recipient "
+            "with the supplied message content."
         ),
         args_schema=MessageInput,
         function=send_message,
@@ -80,17 +81,62 @@ def execute_tool(
     tool = TOOL_REGISTRY.get(tool_name)
 
     if tool is None:
+        write_audit_event(
+            "tool_request",
+            tool=tool_name,
+            outcome="unknown_tool"
+        )
         return f"Tool Error: Unknown tool '{tool_name}'"
+
+    write_audit_event(
+        "tool_request",
+        tool=tool_name,
+        permission=tool.required_permission,
+        argument_fields=list(
+            tool.args_schema.model_fields.keys()
+        )
+    )
 
     # Authorization check happens before execution
     if not policy.is_allowed(tool.required_permission):
+        write_audit_event(
+            "authorization",
+            tool=tool.name,
+            permission=tool.required_permission,
+            outcome="denied"
+        )
         return (
             "Tool authorization error: "
             f"Permission '{tool.required_permission}' "
             "is not allowed."
         )
-    
-    return tool.execute(
+
+    write_audit_event(
+        "authorization",
+        tool=tool.name,
+        permission=tool.required_permission,
+        outcome="allowed"
+    )
+
+    result = tool.execute(
         arguments,
         approval_callback=approval_callback
     )
+
+    if result == "Tool execution cancelled by user.":
+        outcome = "cancelled"
+    elif result.startswith("Tool approval error:"):
+        outcome = "approval_error"
+    elif result.startswith("Tool execution error:"):
+        outcome = "execution_error"
+    else:
+        outcome = "completed"
+
+    write_audit_event(
+        "tool_execution",
+        tool=tool.name,
+        permission=tool.required_permission,
+        outcome=outcome
+    )
+
+    return result
