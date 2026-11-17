@@ -1,3 +1,4 @@
+from typing import Any
 from litellm import completion
 from config import settings
 
@@ -12,7 +13,11 @@ class LiteLLMAdapter:
 
     def complete(self, messages: list[dict[str, str]]) -> str:
         try:
-            response = completion(model=self.model, messages=messages, timeout=60)
+            response = completion(
+                model=self.model, 
+                messages=messages, 
+                timeout=30
+            )
             content = response.choices[0].message.content
 
             if not isinstance(content, str) or not content.strip():
@@ -20,13 +25,13 @@ class LiteLLMAdapter:
             
             return content.strip()
         except Exception as err:
-            raise RuntimeError(f"LLM request faild: {err}") from err
+            raise RuntimeError(f"LLM request failed: {err}") from err
 
     def complete_with_tools(
         self,
-        messages: list[dict[str, any]],
-        tools: list[dict[str, any]]
-    ) -> dict[str, any] :
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]]
+    ) -> dict[str, Any] :
         try:
 
             response = completion(
@@ -34,7 +39,7 @@ class LiteLLMAdapter:
                 messages = messages,
                 tools = tools,
                 tool_choice = "auto",
-                timeout=60
+                timeout=30
             )
 
             message = response.choices[0].message
