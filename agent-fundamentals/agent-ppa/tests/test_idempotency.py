@@ -557,3 +557,123 @@ def test_recovery_list_is_empty_when_no_operations_need_recovery(tmp_path):
     operations = store.get_recovery_required_operations()
 
     assert operations == []
+
+def test_valid_owner_can_cancel_operation(tmp_path):
+    store = IdempotencyStore(tmp_path / "cancel_valid.db")
+
+    claim = store.claim(
+        "cancel_001",
+        "send_message",
+        {
+            "recipient": "test@example.com",
+            "message": "Hello"
+        }
+    )
+
+    cancelled = store.cancel(
+        idempotency_key="cancel_001",
+        lease_token=claim["lease_token"]
+    )
+
+    assert cancelled is True
+
+    operation = store.lookup("cancel_001")
+
+    assert operation["status"] == "cancelled"
+    assert operation["result"] == "Tool execution cancelled by user."
+
+def test_invalid_owner_cannot_cancel_operation(tmp_path):
+    store = IdempotencyStore(tmp_path / "cancel_invalid.db")
+
+    store.claim(
+        "cancel_002",
+        "send_message",
+        {"recipient": "test@example.com", "message": "Hello"}
+    )
+
+    cancelled = store.cancel(
+        idempotency_key="cancel_002",
+        lease_token="invalid-token"
+    )
+
+    assert cancelled is False
+
+    operation = store.lookup("cancel_002")
+    assert operation["status"] == "in_progress"
+
+def test_expired_operation_cannot_be_cancelled_by_old_owner(tmp_path):
+    store = IdempotencyStore(tmp_path / "cancel_expired.db")
+
+    claim = store.claim(
+        "cancel_003",
+        "send_message",
+        {"recipient": "test@example.com", "message": "Hello"}
+    )
+
+    with store._connect() as connection:
+        connection.execute(
+            """
+            UPDATE operations
+            SET lease_expires_at = ?
+            WHERE idempotency_key = ?
+            """,
+            ("2000-01-01T00:00:00+00:00", "cancel_003")
+        )
+
+    store.recover_expired_operations()
+
+    cancelled = store.cancel(
+        idempotency_key="cancel_003",
+        lease_token=claim["lease_token"]
+    )
+
+    assert cancelled is False
+
+    operation = store.lookup("cancel_003")
+    assert operation["status"] == "recovery_required"
+
+def test_expired_lease_cannot_be_finished_before_recovery(tmp_path):
+    store = IdempotencyStore(tmp_path / "expired_finish.db")
+
+    claim = store.claim(
+        idempotency_key="expired_finish_001",
+        tool_name="calculator",
+        arguments={"expression": "5 + 5"}
+    )
+
+    assert claim["status"] == "new"
+
+    # Expire the lease without running the recovery process.
+    with store._connect() as connection:
+        connection.execute(
+            """
+            UPDATE operations
+            SET lease_expires_at = ?
+            WHERE idempotency_key = ?
+            """,
+            ("2000-01-01T00:00:00+00:00", "expired_finish_001")
+        )
+
+    finished = store.finish(
+        idempotency_key="expired_finish_001",
+        lease_token=claim["lease_token"],
+        result="10"
+    )
+
+    assert finished is False
+
+    # The operation must not be marked completed.
+    operation = store.lookup("expired_finish_001")
+
+    assert operation["status"] == "in_progress"
+    assert operation["result"] is None
+
+    # Recovery should subsequently identify the expired operation.
+    recovered = store.recover_expired_operations()
+
+    assert recovered == 1
+
+    operation = store.lookup("expired_finish_001")
+
+    assert operation["status"] == "recovery_required"
+    assert operation["result"] is None

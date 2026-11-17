@@ -436,3 +436,199 @@ def test_lost_lease_during_execution_does_not_report_success(
 
     assert operation["status"] == "recovery_required"
     assert operation["result"] is None
+
+
+def test_duplicate_request_does_not_trigger_second_approval(
+    isolated_idempotency_store,
+    monkeypatch
+):
+    tool = registry.TOOL_REGISTRY["send_message"]
+
+    approval_count = 0
+    execution_count = 0
+    duplicate_result = None
+
+    def fake_send_message(recipient, message):
+        nonlocal execution_count
+        execution_count += 1
+        return "SIMULATION ONLY: Message processed."
+
+    monkeypatch.setattr(
+        tool,
+        "function",
+        fake_send_message
+    )
+
+    policy = ToolPolicy(
+        allowed_permissions=frozenset({"message:send"})
+    )
+
+    def approve_action(tool_name, arguments):
+        nonlocal approval_count, duplicate_result
+
+        approval_count += 1
+
+        # The first request must already own the operation.
+        operation = isolated_idempotency_store.lookup(
+            "duplicate_approval_001"
+        )
+        assert operation["status"] == "in_progress"
+
+        # Simulate a duplicate request arriving while approval
+        # for the first request is still pending.
+        duplicate_result = registry.execute_tool(
+            tool_name="send_message",
+            arguments=(
+                '{"recipient":"test@example.com",'
+                '"message":"Hello"}'
+            ),
+            policy=policy,
+            approval_callback=approve_action,
+            idempotency_key="duplicate_approval_001"
+        )
+
+        return True
+
+    first_result = registry.execute_tool(
+        tool_name="send_message",
+        arguments=(
+            '{"recipient":"test@example.com",'
+            '"message":"Hello"}'
+        ),
+        policy=policy,
+        approval_callback=approve_action,
+        idempotency_key="duplicate_approval_001"
+    )
+
+    assert "SIMULATION ONLY" in first_result
+    assert "already in progress" in duplicate_result
+    assert approval_count == 1
+    assert execution_count == 1
+
+
+def test_rejected_approval_cancels_idempotent_operation(
+    isolated_idempotency_store,
+    monkeypatch
+):
+    tool = registry.TOOL_REGISTRY["send_message"]
+
+    execution_count = 0
+    approval_count = 0
+
+    def fake_send_message(recipient, message):
+        nonlocal execution_count
+        execution_count += 1
+        return "SIMULATION ONLY: Message processed."
+
+    monkeypatch.setattr(
+        tool,
+        "function",
+        fake_send_message
+    )
+
+    policy = ToolPolicy(
+        allowed_permissions=frozenset({"message:send"})
+    )
+
+    def reject_action(tool_name, arguments):
+        nonlocal approval_count
+        approval_count += 1
+        return False
+
+    result = registry.execute_tool(
+        tool_name="send_message",
+        arguments=(
+            '{"recipient":"test@example.com",'
+            '"message":"Hello"}'
+        ),
+        policy=policy,
+        approval_callback=reject_action,
+        idempotency_key="rejected_approval_001"
+    )
+
+    assert "cancelled by user" in result.lower()
+
+    operation = isolated_idempotency_store.lookup(
+        "rejected_approval_001"
+    )
+
+    assert operation["status"] == "cancelled"
+    assert operation["result"] == "Tool execution cancelled by user."
+
+    # A repeated request using the same key must not prompt again.
+    repeated_result = registry.execute_tool(
+        tool_name="send_message",
+        arguments=(
+            '{"recipient":"test@example.com",'
+            '"message":"Hello"}'
+        ),
+        policy=policy,
+        approval_callback=reject_action,
+        idempotency_key="rejected_approval_001"
+    )
+
+    assert "Previous execution was cancelled" in repeated_result
+    assert approval_count == 1
+    assert execution_count == 0
+
+
+def test_expired_lease_during_approval_prevents_execution(
+    isolated_idempotency_store,
+    monkeypatch
+):
+    tool = registry.TOOL_REGISTRY["send_message"]
+
+    execution_count = 0
+
+    def fake_send_message(recipient, message):
+        nonlocal execution_count
+        execution_count += 1
+        return "SIMULATION ONLY: Message processed."
+
+    monkeypatch.setattr(
+        tool,
+        "function",
+        fake_send_message
+    )
+
+    policy = ToolPolicy(
+        allowed_permissions=frozenset({"message:send"})
+    )
+
+    def approve_after_lease_expiry(tool_name, arguments):
+        # Simulate the human taking longer than the lease duration.
+        with isolated_idempotency_store._connect() as connection:
+            connection.execute(
+                """
+                UPDATE operations
+                SET lease_expires_at = ?
+                WHERE idempotency_key = ?
+                """,
+                (
+                    "2000-01-01T00:00:00+00:00",
+                    "approval_lease_expired_001"
+                )
+            )
+
+        return True
+
+    result = registry.execute_tool(
+        tool_name="send_message",
+        arguments=(
+            '{"recipient":"test@example.com",'
+            '"message":"Hello"}'
+        ),
+        policy=policy,
+        approval_callback=approve_after_lease_expiry,
+        idempotency_key="approval_lease_expired_001"
+    )
+
+    assert "Recovery required" in result
+    assert execution_count == 0
+
+    operation = isolated_idempotency_store.lookup(
+        "approval_lease_expired_001"
+    )
+
+    assert operation["status"] == "recovery_required"
+    assert operation["result"] is None

@@ -202,14 +202,12 @@ class IdempotencyStore:
         result: str,
         status: str = "completed"
     ) -> bool:
-
         if status not in {"completed", "failed"}:
             raise ValueError("Invalid final operation status.")
 
         now = datetime.now(timezone.utc).isoformat()
 
         with self._connect() as connection:
-
             cursor = connection.execute(
                 """
                 UPDATE operations
@@ -221,13 +219,15 @@ class IdempotencyStore:
                 WHERE idempotency_key = ?
                 AND lease_token = ?
                 AND status = 'in_progress'
+                AND lease_expires_at > ?
                 """,
                 (
                     status,
                     result,
                     now,
                     idempotency_key,
-                    lease_token
+                    lease_token,
+                    now
                 )
             )
 
@@ -322,5 +322,41 @@ class IdempotencyStore:
             ).fetchall()
 
         return [dict(row) for row in rows]
+
+    def cancel(
+        self,
+        idempotency_key: str,
+        lease_token: str,
+        result: str = "Tool execution cancelled by user."
+    ) -> bool:
+        """
+        Cancel an operation owned by the supplied lease token.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE operations
+                SET status = 'cancelled',
+                    result = ?,
+                    updated_at = ?,
+                    lease_expires_at = NULL,
+                    lease_token = NULL
+                WHERE idempotency_key = ?
+                AND lease_token = ?
+                AND status = 'in_progress'
+                AND lease_expires_at > ?
+                """,
+                (
+                    result,
+                    now,
+                    idempotency_key,
+                    lease_token,
+                    now
+                )
+            )
+
+            return cursor.rowcount == 1
 
 idempotency_store = IdempotencyStore()
