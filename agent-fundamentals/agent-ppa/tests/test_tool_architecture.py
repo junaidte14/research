@@ -306,15 +306,16 @@ def test_failed_operation_is_not_executed_again(
 
     monkeypatch.setattr(tool, "function", fake_calculator)
 
-    isolated_idempotency_store.claim(
+    claim = isolated_idempotency_store.claim(
         "test-operation-004",
         "calculator",
         {"expression": "10 + 5"}
     )
 
     isolated_idempotency_store.finish(
-        "test-operation-004",
-        "Previous simulated failure",
+        idempotency_key = "test-operation-004",
+        result = "Previous simulated failure",
+        lease_token = claim["lease_token"],
         status="failed"
     )
 
@@ -326,3 +327,112 @@ def test_failed_operation_is_not_executed_again(
 
     assert "Automatic re-execution is blocked" in result
     assert execution_count == 0
+
+def test_recovery_required_operation_is_not_executed(
+    isolated_idempotency_store,
+    monkeypatch
+):
+    import tools.registry as registry
+
+    execution_count = 0
+
+    def fake_calculator(expression):
+        nonlocal execution_count
+        execution_count += 1
+        return "10"
+
+    monkeypatch.setattr(
+        registry,
+        "idempotency_store",
+        isolated_idempotency_store
+    )
+
+    monkeypatch.setattr(
+        registry.TOOL_REGISTRY["calculator"],
+        "function",
+        fake_calculator
+    )
+
+    claim = isolated_idempotency_store.claim(
+        "recovery_registry_001",
+        "calculator",
+        {"expression": "5 + 5"}
+    )
+
+    with isolated_idempotency_store._connect() as connection:
+        connection.execute(
+            """
+            UPDATE operations
+            SET lease_expires_at = ?
+            WHERE idempotency_key = ?
+            """,
+            (
+                "2000-01-01T00:00:00+00:00",
+                "recovery_registry_001"
+            )
+        )
+
+    isolated_idempotency_store.recover_expired_operations()
+
+    result = registry.execute_tool(
+        tool_name="calculator",
+        arguments='{"expression": "5 + 5"}',
+        idempotency_key="recovery_registry_001"
+    )
+
+    assert "Recovery required" in result
+    assert execution_count == 0
+
+def test_lost_lease_during_execution_does_not_report_success(
+    isolated_idempotency_store,
+    monkeypatch
+):
+    import tools.registry as registry
+
+    monkeypatch.setattr(
+        registry,
+        "idempotency_store",
+        isolated_idempotency_store
+    )
+
+    def fake_calculator(expression):
+        # Simulate the lease expiring while the tool is executing.
+        with isolated_idempotency_store._connect() as connection:
+            connection.execute(
+                """
+                UPDATE operations
+                SET lease_expires_at = ?
+                WHERE idempotency_key = ?
+                """,
+                (
+                    "2000-01-01T00:00:00+00:00",
+                    "lost_lease_001"
+                )
+            )
+
+        # Simulate another process detecting the expired lease.
+        isolated_idempotency_store.recover_expired_operations()
+
+        # The original worker still returns a result.
+        return "10"
+
+    monkeypatch.setattr(
+        registry.TOOL_REGISTRY["calculator"],
+        "function",
+        fake_calculator
+    )
+
+    result = registry.execute_tool(
+        tool_name="calculator",
+        arguments='{"expression": "5 + 5"}',
+        idempotency_key="lost_lease_001"
+    )
+
+    assert "lease was lost" in result.lower()
+
+    operation = isolated_idempotency_store.lookup(
+        "lost_lease_001"
+    )
+
+    assert operation["status"] == "recovery_required"
+    assert operation["result"] is None

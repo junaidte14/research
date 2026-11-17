@@ -1,10 +1,11 @@
 import hashlib
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 from contextlib import contextmanager
+import uuid
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATABASE_DIRECTORY = PROJECT_ROOT / "data"
@@ -45,7 +46,10 @@ class IdempotencyStore:
                     status TEXT NOT NULL,
                     result TEXT,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    lease_expires_at TEXT,
+                    lease_token TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
@@ -106,15 +110,29 @@ class IdempotencyStore:
         self,
         idempotency_key: str,
         tool_name: str,
-        arguments: dict[str, Any]
+        arguments: dict[str, Any],
+        lease_duration_seconds: int = 60
     ) -> dict[str, Any]:
-        arguments_hash = self._hash_arguments(
-            arguments=arguments
-        )
-        now = datetime.now(timezone.utc).isoformat()
+
+        if lease_duration_seconds <= 0:
+            raise ValueError(
+                "Lease duration must be greater than zero."
+            )
+
+        arguments_hash = self._hash_arguments(arguments)
+
+        now = datetime.now(timezone.utc)
+
+        lease_expires_at = (
+            now + timedelta(seconds=lease_duration_seconds)
+        ).isoformat()
+
+        lease_token = str(uuid.uuid4())
 
         with self._connect() as connection:
+
             connection.execute("BEGIN IMMEDIATE")
+
             existing = connection.execute(
                 """
                 SELECT * FROM operations
@@ -124,18 +142,21 @@ class IdempotencyStore:
             ).fetchone()
 
             if existing is not None:
+
                 if (
                     existing["tool_name"] != tool_name
                     or existing["arguments_hash"] != arguments_hash
                 ):
                     return {
                         "status": "conflict",
-                        "result": None
+                        "result": None,
+                        "lease_token": None
                     }
 
                 return {
                     "status": existing["status"],
-                    "result": existing["result"]
+                    "result": existing["result"],
+                    "lease_token": None
                 }
 
             connection.execute(
@@ -147,9 +168,12 @@ class IdempotencyStore:
                     status,
                     result,
                     created_at,
-                    updated_at
+                    updated_at,
+                    lease_expires_at,
+                    lease_token,
+                    attempt_count
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     idempotency_key,
@@ -157,43 +181,146 @@ class IdempotencyStore:
                     arguments_hash,
                     "in_progress",
                     None,
-                    now,
-                    now
+                    now.isoformat(),
+                    now.isoformat(),
+                    lease_expires_at,
+                    lease_token,
+                    1
                 )
             )
 
             return {
                 "status": "new",
-                "result": None
+                "result": None,
+                "lease_token": lease_token
             }
 
     def finish(
         self,
         idempotency_key: str,
+        lease_token: str,
         result: str,
         status: str = "completed"
-    ) -> None:
+    ) -> bool:
 
         if status not in {"completed", "failed"}:
-            raise ValueError("Invalid final operation status")
+            raise ValueError("Invalid final operation status.")
 
         now = datetime.now(timezone.utc).isoformat()
 
         with self._connect() as connection:
-            connection.execute(
+
+            cursor = connection.execute(
                 """
                 UPDATE operations
                 SET status = ?,
                     result = ?,
-                    updated_at = ?
+                    updated_at = ?,
+                    lease_expires_at = NULL,
+                    lease_token = NULL
                 WHERE idempotency_key = ?
+                AND lease_token = ?
+                AND status = 'in_progress'
                 """,
                 (
                     status,
                     result,
                     now,
-                    idempotency_key
+                    idempotency_key,
+                    lease_token
                 )
             )
+
+            return cursor.rowcount == 1
+
+    def recover_expired_operations(self) -> int:
+        """
+        Mark expired in-progress operations as requiring recovery.
+        Returns the number of operations updated.
+        """
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        with self._connect() as connection:
+
+            cursor = connection.execute(
+                """
+                UPDATE operations
+                SET status = 'recovery_required',
+                    updated_at = ?,
+                    lease_token = NULL,
+                    lease_expires_at = NULL
+                WHERE status = 'in_progress'
+                AND lease_expires_at <= ?
+                """,
+                (now, now)
+            )
+
+            return cursor.rowcount
+
+    def renew_lease(
+        self,
+        idempotency_key: str,
+        lease_token: str,
+        lease_duration_seconds: int = 60
+    ) -> bool:
+        """
+        Extend an active operation's lease.
+
+        Only the current lease owner can renew it.
+        Expired leases cannot be renewed.
+        """
+        if lease_duration_seconds <= 0:
+            raise ValueError("Lease duration must be greater than zero.")
+
+        now = datetime.now(timezone.utc)
+        new_expiry = (
+            now + timedelta(seconds=lease_duration_seconds)
+        ).isoformat()
+
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE operations
+                SET lease_expires_at = ?,
+                    updated_at = ?
+                WHERE idempotency_key = ?
+                AND lease_token = ?
+                AND status = 'in_progress'
+                AND lease_expires_at > ?
+                """,
+                (
+                    new_expiry,
+                    now.isoformat(),
+                    idempotency_key,
+                    lease_token,
+                    now.isoformat()
+                )
+            )
+
+            return cursor.rowcount == 1
+
+    def get_recovery_required_operations(self) -> list[dict[str, Any]]:
+        """
+        Return operations that require manual recovery or inspection.
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    idempotency_key,
+                    tool_name,
+                    status,
+                    result,
+                    attempt_count,
+                    created_at,
+                    updated_at
+                FROM operations
+                WHERE status = 'recovery_required'
+                ORDER BY updated_at ASC
+                """
+            ).fetchall()
+
+        return [dict(row) for row in rows]
 
 idempotency_store = IdempotencyStore()

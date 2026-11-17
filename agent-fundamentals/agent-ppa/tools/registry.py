@@ -128,6 +128,7 @@ def execute_tool(
             approval_callback=approval_callback
         )
 
+    
     else:
         try:
             # 1. Validate arguments before approval.
@@ -159,6 +160,14 @@ def execute_tool(
                         f"Previous result: {existing['result']}"
                     )
 
+                elif status == "recovery_required":
+                    result = (
+                        "Recovery required: The previous operation "
+                        "has an expired lease. Its execution outcome "
+                        "is uncertain. Manual inspection is required. "
+                        "Automatic re-execution is blocked."
+                    )
+
                 else:
                     result = (
                         "Idempotency conflict: This key was "
@@ -188,27 +197,50 @@ def execute_tool(
                     )
 
                     if claim["status"] == "new":
-                        # 5. Execute only after a successful claim.
+                        lease_token = claim["lease_token"]
+
+                        # 5. Execute only after successful claim.
                         try:
                             result = tool.execute_validated(
                                 validated_arguments
                             )
-                            idempotency_store.finish(
-                                idempotency_key,
-                                result,
+
+                            # 6. Finalize using the lease token.
+                            finalized = idempotency_store.finish(
+                                idempotency_key=idempotency_key,
+                                lease_token=lease_token,
+                                result=result,
                                 status="completed"
                             )
 
+                            if not finalized:
+                                result = (
+                                    "Operation execution returned a result, "
+                                    "but its lease was lost before finalization. "
+                                    "The operation requires recovery because "
+                                    "its execution outcome may be uncertain."
+                                )
+
                         except Exception as error:
-                            result = (
-                                "Tool execution error: "
-                                f"{error}"
+                            execution_error = (
+                                f"Tool execution error: {error}"
                             )
-                            idempotency_store.finish(
-                                idempotency_key,
-                                result,
+
+                            finalized = idempotency_store.finish(
+                                idempotency_key=idempotency_key,
+                                lease_token=lease_token,
+                                result=execution_error,
                                 status="failed"
                             )
+
+                            if finalized:
+                                result = execution_error
+                            else:
+                                result = (
+                                    "Tool execution failed, but its lease "
+                                    "was lost before the failure could be "
+                                    "recorded. Manual recovery is required."
+                                )
 
                     elif claim["status"] == "completed":
                         result = claim["result"]
@@ -226,6 +258,13 @@ def execute_tool(
                             f"Previous result: {claim['result']}"
                         )
 
+                    elif claim["status"] == "recovery_required":
+                        result = (
+                            "Recovery required: The previous operation "
+                            "has an expired lease. Manual inspection "
+                            "is required. Automatic re-execution is blocked."
+                        )
+
                     else:
                         result = (
                             "Idempotency conflict: This key was "
@@ -234,14 +273,34 @@ def execute_tool(
 
         except Exception as error:
             result = f"Tool execution error: {error}"
-
-
+    
     if result == "Tool execution cancelled by user.":
         outcome = "cancelled"
+
     elif result.startswith("Tool approval error:"):
         outcome = "approval_error"
+
     elif result.startswith("Tool execution error:"):
         outcome = "execution_error"
+
+    elif result.startswith("Recovery required:"):
+        outcome = "recovery_required"
+
+    elif result.startswith("Tool execution failed,"):
+        outcome = "execution_uncertain"
+
+    elif result.startswith("Operation execution returned a result,"):
+        outcome = "execution_uncertain"
+
+    elif result.startswith("Idempotency notice:"):
+        outcome = "already_in_progress"
+
+    elif result.startswith("Previous execution failed."):
+        outcome = "previously_failed"
+
+    elif result.startswith("Idempotency conflict:"):
+        outcome = "idempotency_conflict"
+
     else:
         outcome = "completed"
 
