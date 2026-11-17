@@ -1,6 +1,7 @@
-
+import pytest
 import json
 from tools.policy import ToolPolicy
+from tools.idempotency import IdempotencyStore
 
 from tools.registry import (
     TOOL_DEFINITIONS,
@@ -8,6 +9,7 @@ from tools.registry import (
     execute_tool
 )
 
+import tools.registry as registry
 
 def test_all_tools_are_registered():
     assert "calculator" in TOOL_REGISTRY
@@ -182,3 +184,145 @@ def test_unauthorized_action_never_requests_approval():
 
     assert "Tool authorization error" in result
     assert approval_called is False
+
+
+
+
+@pytest.fixture
+def isolated_idempotency_store(tmp_path, monkeypatch):
+    store = IdempotencyStore(
+        tmp_path / "test_idempotency.db"
+    )
+    monkeypatch.setattr(
+        registry,
+        "idempotency_store",
+        store
+    )
+    return store
+
+
+def test_idempotent_operation_executes_only_once(
+    isolated_idempotency_store,
+    monkeypatch
+):
+    tool = registry.TOOL_REGISTRY["calculator"]
+    execution_count = 0
+
+    def fake_calculator(expression):
+        nonlocal execution_count
+        execution_count += 1
+        return f"result:{expression}"
+
+    monkeypatch.setattr(tool, "function", fake_calculator)
+
+    first_result = registry.execute_tool(
+        "calculator",
+        '{"expression": "10 + 5"}',
+        idempotency_key="test-operation-001"
+    )
+
+    second_result = registry.execute_tool(
+        "calculator",
+        '{"expression": "10 + 5"}',
+        idempotency_key="test-operation-001"
+    )
+
+    assert first_result == "result:10 + 5"
+    assert second_result == first_result
+    assert execution_count == 1
+
+
+def test_idempotency_key_rejects_different_arguments(
+    isolated_idempotency_store,
+    monkeypatch
+):
+    tool = registry.TOOL_REGISTRY["calculator"]
+    execution_count = 0
+
+    def fake_calculator(expression):
+        nonlocal execution_count
+        execution_count += 1
+        return f"result:{expression}"
+
+    monkeypatch.setattr(tool, "function", fake_calculator)
+
+    registry.execute_tool(
+        "calculator",
+        '{"expression": "10 + 5"}',
+        idempotency_key="test-operation-002"
+    )
+
+    result = registry.execute_tool(
+        "calculator",
+        '{"expression": "20 + 5"}',
+        idempotency_key="test-operation-002"
+    )
+
+    assert "Idempotency conflict" in result
+    assert execution_count == 1
+
+
+def test_in_progress_operation_is_not_executed_again(
+    isolated_idempotency_store,
+    monkeypatch
+):
+    tool = registry.TOOL_REGISTRY["calculator"]
+    execution_count = 0
+
+    def fake_calculator(expression):
+        nonlocal execution_count
+        execution_count += 1
+        return f"result:{expression}"
+
+    monkeypatch.setattr(tool, "function", fake_calculator)
+
+    isolated_idempotency_store.claim(
+        "test-operation-003",
+        "calculator",
+        {"expression": "10 + 5"}
+    )
+
+    result = registry.execute_tool(
+        "calculator",
+        '{"expression": "10 + 5"}',
+        idempotency_key="test-operation-003"
+    )
+
+    assert "already in progress" in result
+    assert execution_count == 0
+
+
+def test_failed_operation_is_not_executed_again(
+    isolated_idempotency_store,
+    monkeypatch
+):
+    tool = registry.TOOL_REGISTRY["calculator"]
+    execution_count = 0
+
+    def fake_calculator(expression):
+        nonlocal execution_count
+        execution_count += 1
+        return f"result:{expression}"
+
+    monkeypatch.setattr(tool, "function", fake_calculator)
+
+    isolated_idempotency_store.claim(
+        "test-operation-004",
+        "calculator",
+        {"expression": "10 + 5"}
+    )
+
+    isolated_idempotency_store.finish(
+        "test-operation-004",
+        "Previous simulated failure",
+        status="failed"
+    )
+
+    result = registry.execute_tool(
+        "calculator",
+        '{"expression": "10 + 5"}',
+        idempotency_key="test-operation-004"
+    )
+
+    assert "Automatic re-execution is blocked" in result
+    assert execution_count == 0

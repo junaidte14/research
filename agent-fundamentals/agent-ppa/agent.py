@@ -98,9 +98,10 @@ def run_agent_turn(
             print(f"[Agent] calling tool: {tool_name} with arguments: {arguments}")
 
             result = execute_tool(
-                tool_name=tool_name, 
-                arguments=arguments, 
-                approval_callback=request_tool_approval
+                tool_name=tool_name,
+                arguments=arguments,
+                approval_callback=request_tool_approval,
+                idempotency_key=tool_id
             )
 
             print(f"[Agent] Tool result: {result}")

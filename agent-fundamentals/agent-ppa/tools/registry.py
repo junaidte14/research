@@ -2,6 +2,7 @@ from typing import Any, Callable
 from tools.base import Tool
 from tools.policy import DEFAULT_TOOL_POLICY, ToolPolicy
 from tools.audit import write_audit_event
+from tools.idempotency import idempotency_store
 
 from tools.calculator import calculator
 from tools.date_time import get_current_datetime
@@ -76,7 +77,8 @@ def execute_tool(
         tool_name: str, 
         arguments: str,
         policy: ToolPolicy = DEFAULT_TOOL_POLICY,
-        approval_callback: Callable[[str, dict[str, Any]], bool] | None = None
+        approval_callback: Callable[[str, dict[str, Any]], bool] | None = None,
+        idempotency_key: str | None = None
     ) -> str:
     tool = TOOL_REGISTRY.get(tool_name)
 
@@ -118,10 +120,121 @@ def execute_tool(
         outcome="allowed"
     )
 
-    result = tool.execute(
-        arguments,
-        approval_callback=approval_callback
-    )
+    
+    # Without an idempotency key, preserve the original behavior.
+    if idempotency_key is None:
+        result = tool.execute(
+            arguments,
+            approval_callback=approval_callback
+        )
+
+    else:
+        try:
+            # 1. Validate arguments before approval.
+            validated_arguments = tool.validate_arguments(arguments)
+
+            # 2. Check whether this operation was already processed.
+            existing = idempotency_store.lookup(
+                idempotency_key,
+                tool_name,
+                validated_arguments
+            )
+
+            if existing is not None:
+                status = existing["status"]
+
+                if status == "completed":
+                    result = existing["result"]
+
+                elif status == "in_progress":
+                    result = (
+                        "Idempotency notice: This operation "
+                        "is already in progress."
+                    )
+
+                elif status == "failed":
+                    result = (
+                        "Previous execution failed. "
+                        "Automatic re-execution is blocked. "
+                        f"Previous result: {existing['result']}"
+                    )
+
+                else:
+                    result = (
+                        "Idempotency conflict: This key was "
+                        "already used for a different operation."
+                    )
+
+            else:
+                # 3. Ask for approval only for a new operation.
+                if tool.requires_approval and approval_callback is None:
+                    result = (
+                        "Tool approval error: No approval handler "
+                        "configured. Action is blocked."
+                    )
+
+                elif not tool.request_approval(
+                    validated_arguments,
+                    approval_callback
+                ):
+                    result = "Tool execution cancelled by user."
+
+                else:
+                    # 4. Atomically claim the operation.
+                    claim = idempotency_store.claim(
+                        idempotency_key,
+                        tool_name,
+                        validated_arguments
+                    )
+
+                    if claim["status"] == "new":
+                        # 5. Execute only after a successful claim.
+                        try:
+                            result = tool.execute_validated(
+                                validated_arguments
+                            )
+                            idempotency_store.finish(
+                                idempotency_key,
+                                result,
+                                status="completed"
+                            )
+
+                        except Exception as error:
+                            result = (
+                                "Tool execution error: "
+                                f"{error}"
+                            )
+                            idempotency_store.finish(
+                                idempotency_key,
+                                result,
+                                status="failed"
+                            )
+
+                    elif claim["status"] == "completed":
+                        result = claim["result"]
+
+                    elif claim["status"] == "in_progress":
+                        result = (
+                            "Idempotency notice: This operation "
+                            "is already in progress."
+                        )
+
+                    elif claim["status"] == "failed":
+                        result = (
+                            "Previous execution failed. "
+                            "Automatic re-execution is blocked. "
+                            f"Previous result: {claim['result']}"
+                        )
+
+                    else:
+                        result = (
+                            "Idempotency conflict: This key was "
+                            "already used for a different operation."
+                        )
+
+        except Exception as error:
+            result = f"Tool execution error: {error}"
+
 
     if result == "Tool execution cancelled by user.":
         outcome = "cancelled"

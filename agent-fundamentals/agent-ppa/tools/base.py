@@ -15,10 +15,6 @@ class Tool:
     retry_delay_seconds: float = 0.5
 
     def to_llm_definition(self) -> dict:
-        """
-        Generate the tool definition expected by the LLM.
-        """
-
         return {
             "type": "function",
             "function": {
@@ -28,51 +24,91 @@ class Tool:
             }
         }
 
-    def execute(
-            self, 
-            arguments_json: str,
-            approval_callback: Callable[[str, dict[str, Any]], bool] | None = None
-        ) -> str:
-        """
-        Validate arguments and execute the Python function.
-        """
+    def validate_arguments(self, arguments_json: str) -> dict[str, Any]:
+        validated = self.args_schema.model_validate_json(
+            arguments_json
+        )
+        return validated.model_dump()
 
-        try:
-            validated_arguments = (
-                self.args_schema.model_validate_json(arguments_json)
+    def request_approval(
+        self,
+        arguments: dict[str, Any],
+        approval_callback: Callable[
+            [str, dict[str, Any]], bool
+        ] | None = None
+    ) -> bool:
+
+        if not self.requires_approval:
+            return True
+
+        if approval_callback is None:
+            return False
+
+        return approval_callback(
+            self.name,
+            arguments
+        ) is True
+
+    def execute_validated(
+        self,
+        arguments: dict[str, Any]
+    ) -> str:
+
+        result = execute_with_retry(
+            self.function,
+            arguments,
+            max_attempts=self.max_attempts,
+            base_delay_seconds=self.retry_delay_seconds
+        )
+
+        if not isinstance(result, str):
+            raise TypeError(
+                "Tool function must return strings."
             )
 
-            # Require explicit approval for sensitive tools
-            if self.requires_approval:
-                if approval_callback is None:
+        return result
+
+    def execute(
+        self,
+        arguments_json: str,
+        approval_callback: Callable[
+            [str, dict[str, Any]], bool
+        ] | None = None
+    ) -> str:
+
+        try:
+            arguments = self.validate_arguments(
+                arguments_json
+            )
+
+            if not self.request_approval(
+                arguments,
+                approval_callback
+            ):
+                if self.requires_approval and approval_callback is None:
                     return (
                         "Tool approval error: No approval handler "
                         "configured. Action is blocked."
                     )
-                approved = approval_callback(
-                    self.name,
-                    validated_arguments.model_dump()
-                )
-                if approved is not True:
-                    return "Tool execution cancelled by user."
 
-            result = execute_with_retry(
-                self.function,
-                validated_arguments.model_dump(),
-                max_attempts=self.max_attempts,
-                base_delay_seconds=self.retry_delay_seconds
-            )
+                return "Tool execution cancelled by user."
 
-            if not isinstance(result, str):
-                raise TypeError("Tool function must return strings")
-
-            return result
+            return self.execute_validated(arguments)
 
         except ValidationError as error:
-            return f"Tool execution error: Invalid arguments. {error}"
-
-        except (ValueError, TypeError, ZeroDivisionError, OverflowError) as error:
-            return f"Tool execution error: {error}"
+            return (
+                f"Tool execution error: Invalid arguments. {error}"
+            )
 
         except TransientToolError as error:
-            return f"Tool execution error: Temporary failure. {error}"
+            return (
+                f"Tool execution error: Temporary failure. {error}"
+            )
+
+        except (
+            ValueError,
+            TypeError,
+            ZeroDivisionError,
+            OverflowError
+        ) as error:
+            return f"Tool execution error: {error}"
