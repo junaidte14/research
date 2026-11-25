@@ -1,16 +1,24 @@
-import re
+import re, json
 from collections import Counter, defaultdict
 
 class BPETokenizer:
 
     PATTERN = re.compile(r" ?[A-Za-z]+| ?[0-9]+| ?[^\sA-Za-z0-9]+|\s+")
 
-    def __init__(self):
+    def __init__(self, special_tokens=None):
+        self._set_special_tokens(special_tokens or [])
         self._reset()
+
+    def _set_special_tokens(self, special_tokens):
+        self.special_tokens = list(special_tokens)
+        self.n_special = len(self.special_tokens)
+        self.special_ids = {token: i for i, token in enumerate(self.special_tokens)}
 
     def _reset(self):
         self.merges = {}
-        self.vocab = {i: bytes([i]) for i in range(256)}
+        self.vocab = {i: token.encode("utf-8") for i, token in enumerate(self.special_tokens)}
+        for b in range(256):
+            self.vocab[self.n_special + b] = bytes([b])
         self.train_bytes = 0
         self.train_tokens = 0
         self._cache = {}
@@ -31,7 +39,7 @@ class BPETokenizer:
     def _count_words(self, text):
         chunks = self.PATTERN.findall(text)
         chunk_counts = Counter(chunks)
-        words = [list(chunk.encode("utf-8")) for chunk in chunk_counts]
+        words = [[b + self.n_special for b in chunk.encode("utf-8")] for chunk in chunk_counts]
         freqs = list(chunk_counts.values())
         return words, freqs
 
@@ -83,7 +91,7 @@ class BPETokenizer:
             #print(best_pair)
             if pair_counts[best_pair] < min_count:
                 break
-            new_id = 256 + len(self.merges)
+            new_id = len(self.vocab)
             #print(new_id)
             self.merges[best_pair] = new_id
             #print(self.merges)
@@ -106,12 +114,32 @@ class BPETokenizer:
         ids = []
         for chunk in self.PATTERN.findall(text):
             if chunk not in self._cache:
-                self._cache[chunk] = self._encode_chunk(list(chunk.encode("utf-8")))
+                start_ids = [b + self.n_special for b in chunk.encode("utf-8")]
+                self._cache[chunk] = self._encode_chunk(start_ids)
             ids.extend(self._cache[chunk])
         return ids
 
     def decode(self, ids):
         return b"".join(self.vocab[i] for i in ids).decode("utf-8", errors="replace")
+
+    def save(self, path):
+        data = {
+            "pattern": self.PATTERN.pattern,
+            "special_tokens": self.special_tokens,
+            "merges": [[a, b, new_id] for (a, b), new_id in self.merges.items()],
+        }
+        with open(path, "w") as f:
+            json.dump(data, f)
+
+    def load(self, path):
+        with open(path) as f:
+            data = json.load(f)
+        assert data["pattern"] == self.PATTERN.pattern, "pattern mismatch"
+        self._set_special_tokens(data["special_tokens"])
+        self._reset()
+        for a, b, new_id in data["merges"]:
+            self.merges[(a, b)] = new_id
+            self.vocab[new_id] = self.vocab[a] + self.vocab[b]
 
     def train_stats(self):
         if not self.train_tokens:
@@ -145,14 +173,82 @@ class BPETokenizer:
             "top_tokens": [(self.vocab[t], c) for t, c in top],
         }
 
-""" tok = BPETokenizer()
-tok.train("low lower lowest café", num_merges=5)
+if __name__ == "__main__":
+    
+    tok = BPETokenizer(special_tokens=["<|endoftext|>"])
+    print(len(tok.vocab), tok.special_ids, tok.vocab[0], tok.vocab[1], tok.vocab[256])
 
-print(tok.merges)
-print(tok.train_stats())
+    tok.train("low lower lowest café", num_merges=5)
+    
+    print(tok.merges)
+    
+    ids = tok.encode("lowest slow café")
+    
+    print(ids)
+    print(tok.decode(ids))
+    print(tok.decode([0]))
 
-ids = tok.encode("lowest slow café")
+    #train, and save
+    import os, time
+    import numpy as np
+    from datasets import load_dataset
 
-print(ids)
-print(tok.decode(ids))
-print(tok.decode([195])) """
+    out_dir = "data_own"
+    os.makedirs(out_dir, exist_ok=True)
+
+    train_ds = load_dataset("roneneldan/TinyStories", split="train")
+    val_ds = load_dataset("roneneldan/TinyStories", split="validation")
+    train_text = "\n".join(train_ds[:20000]["text"])
+
+    tok = BPETokenizer(special_tokens=["<|endoftext|>"])
+    tok.train(train_text, num_merges=8192 - len(tok.vocab))
+    tok.save(f"{out_dir}/tokenizer_own.json")
+    eos_id = tok.special_ids["<|endoftext|>"]
+    print(len(tok.merges), eos_id, len(tok.vocab))
+
+
+    #tokenize both splits
+    counts = {}
+    for name, ds in [("val", val_ds), ("train", train_ds)]:
+        total_tokens = 0
+        start = time.time()
+        with open(f"{out_dir}/{name}.bin", "wb") as f:
+            for batch_start in range(0, len(ds), 1000):
+                texts = ds[batch_start:batch_start + 1000]["text"]
+                chunk = []
+                for text in texts:
+                    chunk.extend(tok.encode(text))
+                    chunk.append(eos_id)
+                np.array(chunk, dtype=np.uint16).tofile(f)
+                total_tokens += len(chunk)
+                if (batch_start // 1000 + 1) % 100 == 0:
+                    print(f"{name}: {batch_start + 1000:,} stories, {total_tokens:,} tokens")
+        counts[name] = (len(ds), total_tokens)
+        print(f"{name}: {len(ds):,} stories, {total_tokens:,} tokens, {time.time() - start:.0f}s")
+
+    #verify, write meta.json, list the files
+    for name, ds in [("val", val_ds), ("train", train_ds)]:
+        data = np.memmap(f"{out_dir}/{name}.bin", dtype=np.uint16, mode="r")
+        n_eos = int((data == eos_id).sum())
+        print(name, len(data), n_eos, int(data.max()))
+        assert len(data) == counts[name][1], f"{name}: token count mismatch"
+        assert n_eos == counts[name][0], f"{name}: end-marker count mismatch"
+        first_end = int(np.argmax(data == eos_id))
+        print("  first story round trip:", tok.decode(data[:first_end].tolist()) == ds[0]["text"])
+
+    meta = {
+        "tokenizer": "own",
+        "vocab_size": len(tok.vocab),
+        "eos_token_id": eos_id,
+        "dtype": "uint16",
+        "train_stories": counts["train"][0],
+        "train_tokens": counts["train"][1],
+        "val_stories": counts["val"][0],
+        "val_tokens": counts["val"][1],
+    }
+    with open(f"{out_dir}/meta.json", "w") as f:
+        json.dump(meta, f, indent=2)
+
+    for fname in sorted(os.listdir(out_dir)):
+        print(fname, round(os.path.getsize(f"{out_dir}/{fname}") / 1e6, 1), "MB")
+

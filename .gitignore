@@ -15,7 +15,12 @@ audit.log
 .coverage
 htmlcov/
 
+.ipynb_checkpoints
+.jupyter
+
 # IDE and OS files
 .vscode/
 .DS_Store
 Thumbs.db
+
+data_own
